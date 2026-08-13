@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.metadata
+import importlib.util
 import platform
 import shutil
 import sqlite3
@@ -26,15 +27,17 @@ from .collectors.video_metadata import (
 from .collectors.ytdlp_channel_video import YtDlpChannelVideoProvider
 from .collectors.ytdlp_video_metadata import YtDlpVideoMetadataProvider
 from .config import Config
-from .database.repository import ChannelRepository, VideoRepository
+from .database.repository import ChannelRepository, TranscriptRepository, VideoRepository
 from .discovery.channel_discovery import ChannelDiscoveryProvider, DiscoveryService
 from .discovery.ytdlp_provider import YtDlpDiscoveryProvider
-from .database.repository import TranscriptRepository
+from .transcripts.opencli_provider import OpenCliTranscriptProvider
 from .transcripts.provider import (
     TranscriptBatchReport,
+    TranscriptPipeline,
     TranscriptProvider,
     TranscriptService,
 )
+from .transcripts.whisper_provider import LocalWhisperTranscriptProvider
 from .transcripts.ytdlp_provider import YtDlpTranscriptProvider
 
 
@@ -99,20 +102,31 @@ def doctor(
         database_error = str(error)
     else:
         database_error = ""
-    checks = (
+    required_checks = (
         ("Python", platform.python_version()),
         ("FFmpeg", _version("ffmpeg", "-version")),
         ("FFprobe", _version("ffprobe", "-version")),
-        ("yt-dlp", yt_dlp_version),
+        ("yt-dlp captions", yt_dlp_version),
         ("SQLite", sqlite3.sqlite_version),
         ("Database", database_status),
     )
+    optional_checks = (
+        ("OpenCLI", _version("opencli", "--version")),
+        (
+            "Local ASR (faster-whisper)",
+            "installed" if importlib.util.find_spec("faster_whisper") else None,
+        ),
+        ("NVIDIA GPU", _version("nvidia-smi", "--query-gpu=name", "--format=csv,noheader")),
+    )
     print("Kiem tra moi truong crawl-yt:")
-    for name, value in checks:
+    for name, value in required_checks:
         status = "PASS" if value else "FAIL"
         detail = value or database_error or "khong tim thay"
         print(f"[{status}] {name}: {detail}")
-    return 0 if all(value for _, value in checks) else 1
+    for name, value in optional_checks:
+        status = "PASS" if value else "OPTIONAL"
+        print(f"[{status}] {name}: {value or 'khong cai dat'}")
+    return 0 if all(value for _, value in required_checks) else 1
 
 
 def discover(
@@ -166,6 +180,16 @@ def stats(
     print(
         f"Videos without transcript: {database.count_videos_without_transcripts()}"
     )
+    source_counts = database.transcript_source_counts()
+    if source_counts:
+        print("Transcript sources:")
+        for source, count in source_counts:
+            print(f"  {source}: {count}")
+    attempt_counts = database.transcript_attempt_status_counts()
+    if attempt_counts:
+        print("Transcript attempts:")
+        for status, count in attempt_counts:
+            print(f"  {status}: {count}")
     print(f"Discovery relationships: {database.count_discovery_relationships()}")
     keyword_counts = database.discovery_keyword_counts()
     if keyword_counts:
@@ -312,9 +336,16 @@ def _transcript_service(
     provider: TranscriptProvider | None,
     repository: ChannelRepository | None,
 ) -> TranscriptService:
-    return TranscriptService(
-        provider or YtDlpTranscriptProvider(), _transcript_repository(repository)
+    transcript_repository = _transcript_repository(repository)
+    if provider is not None:
+        return TranscriptService(provider, transcript_repository)
+    pipeline = TranscriptPipeline(
+        YtDlpTranscriptProvider(),
+        transcript_repository,
+        OpenCliTranscriptProvider(),
+        LocalWhisperTranscriptProvider(),
     )
+    return TranscriptService(pipeline, transcript_repository)
 
 
 def _print_transcript_batch(report: TranscriptBatchReport) -> None:
@@ -335,7 +366,11 @@ def transcript(
     repository: ChannelRepository | None = None,
 ) -> int:
     result = _transcript_service(provider, repository).transcript(
-        args.video_id, args.lang, args.force
+        args.video_id,
+        args.lang,
+        args.force,
+        fallback=args.fallback,
+        allow_audio=args.allow_audio,
     )
     print(f"Video: {result.video_id}")
     if not result.success:
@@ -348,6 +383,7 @@ def transcript(
     print(f"Source: {item.source}")
     print(f"Segments: {len(item.segments)}")
     print(f"Text length: {len(item.text)}")
+    print(f"Provider attempts: {result.attempts}")
     return 0
 
 
@@ -361,7 +397,11 @@ def transcript_channel(
 ) -> int:
     try:
         report = _transcript_service(provider, repository).transcript_channel(
-            _channel_id(args.channel), args.limit, args.lang
+            _channel_id(args.channel),
+            args.limit,
+            args.lang,
+            fallback=args.fallback,
+            allow_audio=args.allow_audio,
         )
     except ValueError as error:
         print(f"Transcript failed: {error}", file=sys.stderr)
@@ -379,7 +419,10 @@ def transcript_pending(
     repository: ChannelRepository | None = None,
 ) -> int:
     report = _transcript_service(provider, repository).transcript_pending(
-        args.limit, args.lang
+        args.limit,
+        args.lang,
+        fallback=args.fallback,
+        allow_audio=args.allow_audio,
     )
     _print_transcript_batch(report)
     return 1 if report.failed else 0
@@ -407,9 +450,20 @@ def positive_int(value: str) -> int:
     return number
 
 
+def _add_fallback_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--fallback", action="store_true", help="Cho phep fallback khong audio"
+    )
+    parser.add_argument(
+        "--allow-audio",
+        action="store_true",
+        help="Cho phep tai audio va ASR cuc bo (can --fallback)",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="crawl-yt", description="YouTube Intelligence Engine - Phase 1D"
+        prog="crawl-yt", description="YouTube Intelligence Engine - Phase 1E"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -459,6 +513,7 @@ def build_parser() -> argparse.ArgumentParser:
     transcript_parser.add_argument("video_id")
     transcript_parser.add_argument("--lang")
     transcript_parser.add_argument("--force", action="store_true")
+    _add_fallback_flags(transcript_parser)
     transcript_parser.set_defaults(handler=transcript)
 
     transcript_channel_parser = subparsers.add_parser(
@@ -469,6 +524,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit", type=positive_int, required=True
     )
     transcript_channel_parser.add_argument("--lang")
+    _add_fallback_flags(transcript_channel_parser)
     transcript_channel_parser.set_defaults(handler=transcript_channel)
 
     transcript_pending_parser = subparsers.add_parser(
@@ -478,6 +534,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit", type=positive_int, required=True
     )
     transcript_pending_parser.add_argument("--lang")
+    _add_fallback_flags(transcript_pending_parser)
     transcript_pending_parser.set_defaults(handler=transcript_pending)
 
     stats_parser = subparsers.add_parser("stats", help="Hien thi thong ke")
@@ -495,6 +552,9 @@ def main(
     repository: ChannelRepository | None = None,
 ) -> int:
     args = build_parser().parse_args(argv)
+    if getattr(args, "allow_audio", False) and not getattr(args, "fallback", False):
+        print("--allow-audio requires --fallback", file=sys.stderr)
+        return 2
     return args.handler(
         args,
         discovery_provider,

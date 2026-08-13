@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .models import Channel, ChannelDiscovery, Transcript, Video
+from .models import Channel, ChannelDiscovery, Transcript, TranscriptAttempt, Video
 
 
 class ChannelRepository:
@@ -113,6 +113,26 @@ class ChannelRepository:
                     ON transcripts(language);
                 CREATE INDEX IF NOT EXISTS idx_transcripts_source
                     ON transcripts(source);
+                CREATE TABLE IF NOT EXISTS transcript_attempts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    video_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    requested_language TEXT,
+                    status TEXT NOT NULL CHECK (
+                        status IN ('success', 'failed', 'unavailable', 'skipped')
+                    ),
+                    error_type TEXT,
+                    error_message TEXT,
+                    attempted_at TEXT NOT NULL,
+                    FOREIGN KEY (video_id) REFERENCES videos(video_id)
+                        ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_transcript_attempts_video_id
+                    ON transcript_attempts(video_id);
+                CREATE INDEX IF NOT EXISTS idx_transcript_attempts_provider
+                    ON transcript_attempts(provider);
+                CREATE INDEX IF NOT EXISTS idx_transcript_attempts_attempted_at
+                    ON transcript_attempts(attempted_at);
                 """
             )
             video_columns = {
@@ -515,6 +535,70 @@ class VideoRepository(ChannelRepository):
 
 
 class TranscriptRepository(VideoRepository):
+    def record_transcript_attempt(self, attempt: TranscriptAttempt) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO transcript_attempts (
+                    video_id, provider, requested_language, status,
+                    error_type, error_message, attempted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    attempt.video_id,
+                    attempt.provider,
+                    attempt.requested_language,
+                    attempt.status,
+                    attempt.error_type,
+                    attempt.error_message,
+                    self._timestamp(attempt.attempted_at),
+                ),
+            )
+
+    def list_transcript_attempts(self, video_id: str) -> list[TranscriptAttempt]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT video_id, provider, requested_language, status,
+                       error_type, error_message, attempted_at
+                FROM transcript_attempts WHERE video_id = ?
+                ORDER BY id
+                """,
+                (video_id,),
+            ).fetchall()
+        return [
+            TranscriptAttempt(
+                video_id=row["video_id"],
+                provider=row["provider"],
+                requested_language=row["requested_language"],
+                status=row["status"],
+                error_type=row["error_type"],
+                error_message=row["error_message"],
+                attempted_at=datetime.fromisoformat(row["attempted_at"]),
+            )
+            for row in rows
+        ]
+
+    def transcript_source_counts(self) -> list[tuple[str, int]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT source, COUNT(*) FROM transcripts
+                GROUP BY source ORDER BY COUNT(*) DESC, source
+                """
+            ).fetchall()
+        return [(str(row[0]), int(row[1])) for row in rows]
+
+    def transcript_attempt_status_counts(self) -> list[tuple[str, int]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT status, COUNT(*) FROM transcript_attempts
+                GROUP BY status ORDER BY status
+                """
+            ).fetchall()
+        return [(str(row[0]), int(row[1])) for row in rows]
+
     def upsert_transcript(self, transcript: Transcript) -> bool:
         now = datetime.now(timezone.utc)
         created_at = transcript.created_at or now

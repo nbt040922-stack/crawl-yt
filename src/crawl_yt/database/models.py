@@ -59,3 +59,14 @@ class Transcript:
     segments: list[dict[str, Any]] = field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+@dataclass(slots=True)
+class TranscriptAttempt:
+    video_id: str
+    provider: str
+    requested_language: str | None
+    status: str
+    attempted_at: datetime
+    error_type: str | None = None
+    error_message: str | None = None

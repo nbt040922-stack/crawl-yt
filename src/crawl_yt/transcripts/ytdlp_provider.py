@@ -7,11 +7,13 @@ import json
 import re
 import xml.etree.ElementTree as ET
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlsplit
 
 from yt_dlp import YoutubeDL
 
 from .provider import TranscriptData, select_language
+from .errors import NoSubtitleError, TransientSubtitleError, UnavailableVideoError
 
 _TAG = re.compile(r"<[^>]+>")
 _TIMING = re.compile(
@@ -173,34 +175,58 @@ class YtDlpTranscriptProvider:
             "skip_download": True,
         }
         url = webpage_url or f"https://www.youtube.com/watch?v={video_id}"
-        with YoutubeDL(options) as ydl:
-            info = ydl.extract_info(url, download=False)
-            if not info:
-                raise RuntimeError("yt-dlp returned no video metadata")
-            manual = info.get("subtitles") or {}
-            automatic = {
-                language: [track for track in tracks if _not_translated(track)]
-                for language, tracks in (info.get("automatic_captions") or {}).items()
-            }
-            automatic = {key: value for key, value in automatic.items() if value}
-            selection = select_subtitle_track(
-                manual, automatic, preferred_languages
-            )
-            if selection is None:
-                raise RuntimeError("no matching manual or automatic subtitles")
-            language, source, tracks = selection
-            formats = {track.get("ext"): track for track in tracks if track.get("url")}
-            extension = next(
-                (item for item in ("json3", "vtt", "srv3") if item in formats),
-                None,
-            )
-            if extension is None:
-                raise RuntimeError("no supported timestamped subtitle format")
-            payload = ydl.urlopen(formats[extension]["url"]).read().decode(
-                "utf-8", errors="replace"
-            )
-        segments = normalize_subtitle(payload, extension)
+        try:
+            with YoutubeDL(options) as ydl:
+                info = ydl.extract_info(url, download=False)
+                if not info:
+                    raise UnavailableVideoError("yt-dlp returned no video metadata")
+                manual = info.get("subtitles") or {}
+                automatic = {
+                    language: [track for track in tracks if _not_translated(track)]
+                    for language, tracks in (info.get("automatic_captions") or {}).items()
+                }
+                automatic = {key: value for key, value in automatic.items() if value}
+                selection = select_subtitle_track(
+                    manual, automatic, preferred_languages
+                )
+                if selection is None:
+                    raise NoSubtitleError(
+                        "no matching manual or automatic subtitles"
+                    )
+                language, source, tracks = selection
+                formats = {
+                    track.get("ext"): track for track in tracks if track.get("url")
+                }
+                extension = next(
+                    (item for item in ("json3", "vtt", "srv3") if item in formats),
+                    None,
+                )
+                if extension is None:
+                    raise NoSubtitleError(
+                        "no supported timestamped subtitle format"
+                    )
+                try:
+                    response = ydl.urlopen(formats[extension]["url"]).read()
+                except HTTPError as error:
+                    if error.code in {408, 425, 429} or error.code >= 500:
+                        raise TransientSubtitleError(
+                            f"temporary subtitle HTTP {error.code}"
+                        ) from error
+                    raise NoSubtitleError(f"subtitle HTTP {error.code}") from error
+                except (OSError, URLError) as error:
+                    raise TransientSubtitleError(str(error)) from error
+                if not response:
+                    raise TransientSubtitleError("empty subtitle response")
+                payload = response.decode("utf-8", errors="replace")
+        except (NoSubtitleError, TransientSubtitleError, UnavailableVideoError):
+            raise
+        except Exception as error:
+            raise UnavailableVideoError(str(error)) from error
+        try:
+            segments = normalize_subtitle(payload, extension)
+        except (ValueError, json.JSONDecodeError, ET.ParseError) as error:
+            raise TransientSubtitleError(f"malformed subtitle: {error}") from error
         if not segments:
-            raise RuntimeError("subtitle contains no usable cues")
+            raise TransientSubtitleError("subtitle contains no usable cues")
         text = " ".join(str(segment["text"]) for segment in segments)
         return TranscriptData(video_id, language, source, text, segments)

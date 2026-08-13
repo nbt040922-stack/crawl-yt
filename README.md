@@ -1,8 +1,8 @@
 # crawl-yt
 
-Nen tang Phase 1D cho YouTube Intelligence Engine. Du an tim channel, liet ke
-video, bo sung metadata va luu YouTube captions theo timestamp. Khong tai
-video/audio, khong Whisper va chua chay phan tich.
+Nen tang Phase 1E cho YouTube Intelligence Engine. Du an tim channel, liet ke
+video, bo sung metadata va luu transcript theo timestamp. YouTube captions la
+duong mac dinh re; audio va ASR cuc bo luon la fallback dat tien, phai bat ro.
 
 ## Cai dat tren Windows
 
@@ -12,9 +12,17 @@ py -3.11 -m venv .venv
 python -m pip install -e .
 ```
 
-Project hien da co `.venv` cuc bo voi dependency duy nhat la `yt-dlp`.
+Project hien da co `.venv` cuc bo voi dependency bat buoc duy nhat la `yt-dlp`.
+Local ASR la tuy chon va khong duoc cai tu dong:
 
-## Lenh Phase 1D
+```powershell
+python -m pip install -e ".[asr]"
+```
+
+Lenh tren cai `faster-whisper` vao virtualenv cua project. Khong can thay doi
+CUDA driver/toolkit he thong.
+
+## Lenh Phase 1E
 
 ```powershell
 python main.py doctor
@@ -30,8 +38,12 @@ python main.py enrich-pending --limit 50
 python main.py transcript VIDEO_ID
 python main.py transcript VIDEO_ID --lang en
 python main.py transcript VIDEO_ID --lang en --force
+python main.py transcript VIDEO_ID --fallback
+python main.py transcript VIDEO_ID --lang en --fallback --allow-audio
 python main.py transcript-channel UCxxxxxxxxxxxx --limit 20 --lang en
+python main.py transcript-channel UCxxxxxxxxxxxx --limit 5 --fallback --allow-audio
 python main.py transcript-pending --limit 50 --lang en
+python main.py transcript-pending --limit 10 --fallback
 python main.py stats
 ```
 
@@ -48,10 +60,21 @@ luon `download=False`. `enrich-channel` va `enrich-pending` bat buoc co
 `--limit`; batch chay tuan tu va tiep tuc neu mot video loi.
 
 Transcript mac dinh uu tien ngon ngu `en`, `en-US`, `en-GB`. Manual caption
-duoc uu tien hon auto-generated caption; khong dung subtitle da dich. Lenh don
-dung transcript da luu neu phu hop, con `--force` se fetch va upsert lai.
+duoc uu tien hon auto-generated caption; khong dung subtitle da dich. Loi tam
+thoi khi tai caption duoc thu toi da 3 lan. Lenh don dung transcript da luu neu
+phu hop, con `--force` se fetch va upsert lai.
+
+Chinh sach fallback duoc tach ro de an toan khi crawl quy mo lon:
+
+- Khong co flag: chi YouTube manual/auto captions.
+- `--fallback`: captions, sau do OpenCLI neu executable co san.
+- `--fallback --allow-audio`: them tai `bestaudio` tam thoi va ASR cuc bo bang
+  `faster-whisper`. Audio bi xoa sau ca thanh cong lan that bai.
+- `--allow-audio` dung mot minh bi tu choi.
+
 `transcript-channel` va `transcript-pending` bat buoc co `--limit`, chay tuan tu
-va tiep tuc neu mot video khong co subtitle. Chua co Whisper fallback.
+va tiep tuc neu mot video loi. Audio ASR khong bao gio tu chay chi vi bat
+`--fallback`, vi chi phi tai va suy luan cao hon captions rat nhieu.
 
 Database mac dinh la `data/crawl_yt.db`. Channel metadata canonical duoc luu
 trong `channels`; moi quan he channel/keyword/source duoc luu rieng trong
@@ -88,6 +111,12 @@ like/comment count, thumbnail, availability, tags, categories va language.
 Transcript luu ca full text va danh sach segment co `start`, `end`, `text`.
 Subtitle markup va whitespace duoc lam sach; rolling captions chi duoc dedup
 bao thu khi cac cue overlap.
+
+Nguon transcript duoc giu nguyen: `youtube_manual`, `youtube_auto`, `opencli`,
+hoac `local_whisper`. `transcript_attempts` ghi lich su provider, trang thai va
+loai loi de chan doan; Phase 1E chua tu dong suppress cac video tung that bai.
+OpenCLI chi duoc dung khi tim thay executable. Neu output khong co timestamp,
+segments duoc luu rong thay vi tao timestamp gia.
 
 ## Cac lenh van la placeholder
 
