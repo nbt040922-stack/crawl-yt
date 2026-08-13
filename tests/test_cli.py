@@ -33,15 +33,24 @@ class CliTests(unittest.TestCase):
         self.assertTrue(args.dry_run)
 
     def test_crawl_argument_parsing(self) -> None:
-        args = build_parser().parse_args(["crawl", "UC123", "--limit", "20"])
+        args = build_parser().parse_args(
+            ["crawl", "UC123", "--limit", "20", "--full", "--known-stop-threshold", "7"]
+        )
         self.assertEqual(args.channel, "UC123")
         self.assertEqual(args.limit, 20)
+        self.assertTrue(args.full)
+        self.assertEqual(args.known_stop_threshold, 7)
 
         all_args = build_parser().parse_args(
             ["crawl-all", "--max-channels", "3", "--limit-per-channel", "10"]
         )
         self.assertEqual(all_args.max_channels, 3)
         self.assertEqual(all_args.limit_per_channel, 10)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            build_parser().parse_args(["crawl-due"])
+        self.assertEqual(
+            build_parser().parse_args(["crawl-due", "--limit", "20"]).limit, 20
+        )
 
     def test_enrichment_argument_parsing_and_required_limits(self) -> None:
         single = build_parser().parse_args(["enrich", "video-1"])

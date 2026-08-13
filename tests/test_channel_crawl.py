@@ -10,7 +10,6 @@ from pathlib import Path
 from src.crawl_yt.collectors.channel_collector import (
     ChannelCrawlService,
     UnknownChannelError,
-    VideoBatch,
 )
 from src.crawl_yt.collectors.ytdlp_channel_video import normalize_video
 from src.crawl_yt.database.models import Channel, Video
@@ -21,7 +20,7 @@ class FakeVideoProvider:
     def __init__(self, failing_channel: str | None = None) -> None:
         self.failing_channel = failing_channel
 
-    def list_videos(self, channel_id: str, limit: int | None = None) -> VideoBatch:
+    def iterate_videos(self, channel_id: str, limit: int | None = None):
         if channel_id == self.failing_channel:
             raise RuntimeError("provider failure")
         now = datetime.now(timezone.utc)
@@ -29,7 +28,7 @@ class FakeVideoProvider:
             Video(f"{channel_id}-1", channel_id, "One", now),
             Video(f"{channel_id}-2", channel_id, "Two", now),
         ]
-        return VideoBatch(enumerated_entries=2, videos=videos)
+        yield from videos[:limit]
 
 
 class ChannelCrawlTests(unittest.TestCase):

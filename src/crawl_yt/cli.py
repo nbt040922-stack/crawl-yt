@@ -173,6 +173,12 @@ def stats(
     print()
     print(f"Channels: {database.count_channels()}")
     print(f"Videos: {database.count_videos()}")
+    crawl_counts = database.crawl_state_counts()
+    print("Crawl state:")
+    print(f"  never crawled: {crawl_counts['never_crawled']}")
+    print(f"  due: {crawl_counts['due']}")
+    print(f"  healthy: {crawl_counts['healthy']}")
+    print(f"  failing: {crawl_counts['failing']}")
     print(f"Metadata enriched: {database.count_enriched_videos()}")
     print(f"Metadata pending: {database.count_videos_needing_enrichment()}")
     print(f"Transcripts: {database.count_transcripts()}")
@@ -211,11 +217,17 @@ def _channel_id(value: str) -> str:
 
 def _print_crawl(report: CrawlReport) -> None:
     print(f"Channel: {report.channel_title} ({report.channel_id})")
+    print(f"Mode: {report.mode}")
     print(f"Enumerated entries: {report.enumerated_entries}")
     print(f"Unique videos: {report.unique_videos}")
     print(f"New videos: {report.new_videos}")
     print(f"Existing videos: {report.existing_videos}")
     print(f"Skipped: {report.skipped_entries}")
+    print(f"Stopped early: {'yes' if report.stopped_early else 'no'}")
+    if report.stop_reason:
+        print(f"Stop reason: {report.stop_reason}")
+    print(f"Consecutive known at stop: {report.consecutive_known_at_stop}")
+    print(f"Elapsed time: {report.elapsed_seconds:.2f}s")
 
 
 def crawl(
@@ -230,7 +242,12 @@ def crawl(
         provider or YtDlpChannelVideoProvider(), _video_repository(repository)
     )
     try:
-        report = service.crawl(_channel_id(args.channel), args.limit)
+        report = service.crawl(
+            _channel_id(args.channel),
+            args.limit,
+            full=args.full,
+            known_stop_threshold=args.known_stop_threshold,
+        )
     except UnknownChannelError as error:
         print(f"Crawl failed: {error}", file=sys.stderr)
         return 1
@@ -260,6 +277,26 @@ def crawl_all(
     print(f"New videos: {report.new_videos}")
     print(f"Existing videos: {report.existing_videos}")
     print(f"Skipped: {report.skipped_entries}")
+    print(f"Failures: {len(report.failures)}")
+    for channel_id, error in report.failures:
+        print(f"  {channel_id}: {error}")
+    return 1 if report.failures else 0
+
+
+def crawl_due(
+    args: argparse.Namespace,
+    _: ChannelDiscoveryProvider | None = None,
+    provider: ChannelVideoProvider | None = None,
+    __: VideoMetadataProvider | None = None,
+    ___: TranscriptProvider | None = None,
+    repository: ChannelRepository | None = None,
+) -> int:
+    service = ChannelCrawlService(
+        provider or YtDlpChannelVideoProvider(), _video_repository(repository)
+    )
+    report = service.crawl_due(args.limit)
+    print(f"Channels attempted: {report.channels_attempted}")
+    print(f"Channels succeeded: {report.channels_succeeded}")
     print(f"Failures: {len(report.failures)}")
     for channel_id, error in report.failures:
         print(f"  {channel_id}: {error}")
@@ -483,7 +520,17 @@ def build_parser() -> argparse.ArgumentParser:
     crawl_parser = subparsers.add_parser("crawl", help="Thu thap mot kenh")
     crawl_parser.add_argument("channel")
     crawl_parser.add_argument("--limit", type=positive_int)
+    crawl_parser.add_argument("--full", action="store_true")
+    crawl_parser.add_argument(
+        "--known-stop-threshold", type=positive_int, default=5
+    )
     crawl_parser.set_defaults(handler=crawl)
+
+    crawl_due_parser = subparsers.add_parser(
+        "crawl-due", help="Thu thap cac kenh da den lich"
+    )
+    crawl_due_parser.add_argument("--limit", type=positive_int, required=True)
+    crawl_due_parser.set_defaults(handler=crawl_due)
 
     crawl_all_parser = subparsers.add_parser("crawl-all", help="Thu thap moi kenh")
     crawl_all_parser.add_argument("--max-channels", type=positive_int)

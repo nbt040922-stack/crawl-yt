@@ -28,6 +28,22 @@ class ChannelDiscovery:
 
 
 @dataclass(slots=True)
+class ChannelCrawlState:
+    channel_id: str
+    last_crawl_started_at: datetime | None = None
+    last_crawl_completed_at: datetime | None = None
+    last_success_at: datetime | None = None
+    last_error_at: datetime | None = None
+    last_error: str | None = None
+    last_seen_video_id: str | None = None
+    last_seen_published_at: datetime | None = None
+    consecutive_failures: int = 0
+    total_crawls: int = 0
+    next_crawl_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(slots=True)
 class Video:
     video_id: str
     channel_id: str

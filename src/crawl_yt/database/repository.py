@@ -6,10 +6,17 @@ import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .models import Channel, ChannelDiscovery, Transcript, TranscriptAttempt, Video
+from .models import (
+    Channel,
+    ChannelCrawlState,
+    ChannelDiscovery,
+    Transcript,
+    TranscriptAttempt,
+    Video,
+)
 
 
 class ChannelRepository:
@@ -133,6 +140,26 @@ class ChannelRepository:
                     ON transcript_attempts(provider);
                 CREATE INDEX IF NOT EXISTS idx_transcript_attempts_attempted_at
                     ON transcript_attempts(attempted_at);
+                CREATE TABLE IF NOT EXISTS channel_crawl_state (
+                    channel_id TEXT PRIMARY KEY,
+                    last_crawl_started_at TEXT,
+                    last_crawl_completed_at TEXT,
+                    last_success_at TEXT,
+                    last_error_at TEXT,
+                    last_error TEXT,
+                    last_seen_video_id TEXT,
+                    last_seen_published_at TEXT,
+                    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                    total_crawls INTEGER NOT NULL DEFAULT 0,
+                    next_crawl_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (channel_id) REFERENCES channels(channel_id)
+                        ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_channel_crawl_state_next_crawl_at
+                    ON channel_crawl_state(next_crawl_at);
+                CREATE INDEX IF NOT EXISTS idx_channel_crawl_state_last_success_at
+                    ON channel_crawl_state(last_success_at);
                 """
             )
             video_columns = {
@@ -334,6 +361,168 @@ class ChannelRepository:
 
 
 class VideoRepository(ChannelRepository):
+    def get_channel_crawl_state(
+        self, channel_id: str
+    ) -> ChannelCrawlState | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM channel_crawl_state WHERE channel_id = ?",
+                (channel_id,),
+            ).fetchone()
+        return self._crawl_state(row) if row else None
+
+    def ensure_channel_crawl_state(self, channel_id: str) -> ChannelCrawlState:
+        now = datetime.now(timezone.utc)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO channel_crawl_state (channel_id, updated_at)
+                VALUES (?, ?)
+                """,
+                (channel_id, self._timestamp(now)),
+            )
+        state = self.get_channel_crawl_state(channel_id)
+        if state is None:  # Only possible if the channel foreign key is invalid.
+            raise sqlite3.IntegrityError(f"channel {channel_id} does not exist")
+        return state
+
+    def mark_crawl_started(
+        self, channel_id: str, now: datetime | None = None
+    ) -> None:
+        started_at = now or datetime.now(timezone.utc)
+        self.ensure_channel_crawl_state(channel_id)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE channel_crawl_state
+                SET last_crawl_started_at = ?, updated_at = ?
+                WHERE channel_id = ?
+                """,
+                (self._timestamp(started_at), self._timestamp(started_at), channel_id),
+            )
+
+    def mark_crawl_success(
+        self,
+        channel_id: str,
+        last_seen_video_id: str | None,
+        last_seen_published_at: datetime | None,
+        now: datetime | None = None,
+        crawl_interval: timedelta = timedelta(hours=24),
+    ) -> None:
+        completed_at = now or datetime.now(timezone.utc)
+        self.ensure_channel_crawl_state(channel_id)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE channel_crawl_state SET
+                    last_crawl_completed_at = ?, last_success_at = ?,
+                    last_error = NULL,
+                    last_seen_video_id = COALESCE(?, last_seen_video_id),
+                    last_seen_published_at = COALESCE(?, last_seen_published_at),
+                    consecutive_failures = 0,
+                    total_crawls = total_crawls + 1, next_crawl_at = ?, updated_at = ?
+                WHERE channel_id = ?
+                """,
+                (
+                    self._timestamp(completed_at),
+                    self._timestamp(completed_at),
+                    last_seen_video_id,
+                    self._timestamp(last_seen_published_at),
+                    self._timestamp(completed_at + crawl_interval),
+                    self._timestamp(completed_at),
+                    channel_id,
+                ),
+            )
+
+    def mark_crawl_failure(
+        self,
+        channel_id: str,
+        error: str,
+        now: datetime | None = None,
+        crawl_interval: timedelta = timedelta(hours=24),
+    ) -> None:
+        failed_at = now or datetime.now(timezone.utc)
+        self.ensure_channel_crawl_state(channel_id)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE channel_crawl_state SET
+                    last_error_at = ?, last_error = ?,
+                    consecutive_failures = consecutive_failures + 1,
+                    total_crawls = total_crawls + 1, next_crawl_at = ?, updated_at = ?
+                WHERE channel_id = ?
+                """,
+                (
+                    self._timestamp(failed_at),
+                    error,
+                    self._timestamp(failed_at + crawl_interval),
+                    self._timestamp(failed_at),
+                    channel_id,
+                ),
+            )
+
+    def list_channels_due_for_crawl(
+        self, limit: int | None = None, now: datetime | None = None
+    ) -> list[Channel]:
+        sql = """
+            SELECT c.* FROM channels AS c
+            JOIN channel_crawl_state AS s ON s.channel_id = c.channel_id
+            WHERE s.next_crawl_at IS NOT NULL AND s.next_crawl_at <= ?
+            ORDER BY s.next_crawl_at, c.channel_id
+        """
+        parameters: list[object] = [
+            self._timestamp(now or datetime.now(timezone.utc))
+        ]
+        if limit is not None:
+            sql += " LIMIT ?"
+            parameters.append(limit)
+        with self._connect() as connection:
+            rows = connection.execute(sql, parameters).fetchall()
+        return [self._channel(row) for row in rows]
+
+    def crawl_state_counts(
+        self, now: datetime | None = None
+    ) -> dict[str, int]:
+        current = self._timestamp(now or datetime.now(timezone.utc))
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM channels) - COUNT(*) AS never_crawled,
+                    SUM(CASE WHEN next_crawl_at <= ? THEN 1 ELSE 0 END) AS due,
+                    SUM(CASE WHEN consecutive_failures = 0 THEN 1 ELSE 0 END) AS healthy,
+                    SUM(CASE WHEN consecutive_failures > 0 THEN 1 ELSE 0 END) AS failing
+                FROM channel_crawl_state
+                """,
+                (current,),
+            ).fetchone()
+        return {
+            "never_crawled": int(row[0] or 0),
+            "due": int(row[1] or 0),
+            "healthy": int(row[2] or 0),
+            "failing": int(row[3] or 0),
+        }
+
+    @staticmethod
+    def _crawl_state(row: sqlite3.Row) -> ChannelCrawlState:
+        def timestamp(name: str) -> datetime | None:
+            return datetime.fromisoformat(row[name]) if row[name] else None
+
+        return ChannelCrawlState(
+            channel_id=row["channel_id"],
+            last_crawl_started_at=timestamp("last_crawl_started_at"),
+            last_crawl_completed_at=timestamp("last_crawl_completed_at"),
+            last_success_at=timestamp("last_success_at"),
+            last_error_at=timestamp("last_error_at"),
+            last_error=row["last_error"],
+            last_seen_video_id=row["last_seen_video_id"],
+            last_seen_published_at=timestamp("last_seen_published_at"),
+            consecutive_failures=row["consecutive_failures"],
+            total_crawls=row["total_crawls"],
+            next_crawl_at=timestamp("next_crawl_at"),
+            updated_at=timestamp("updated_at"),
+        )
+
     def upsert_video(self, video: Video) -> bool:
         """Upsert video metadata while preserving the original first_seen_at."""
         with self._connect() as connection:

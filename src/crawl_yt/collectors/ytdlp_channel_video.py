@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from collections.abc import Iterator
 from typing import Any
 
 from yt_dlp import YoutubeDL
 
 from ..database.models import Video
-from .channel_collector import VideoBatch
 
 
 def _integer(value: Any) -> int | None:
@@ -66,12 +66,12 @@ def normalize_video(entry: dict[str, Any], channel_id: str) -> Video | None:
 
 
 class YtDlpChannelVideoProvider:
-    def list_videos(
+    def iterate_videos(
         self, channel_id: str, limit: int | None = None
-    ) -> VideoBatch:
+    ) -> Iterator[Video | None]:
         options: dict[str, Any] = {
             "extract_flat": "in_playlist",
-            "ignoreerrors": True,
+            "ignoreerrors": False,
             "lazy_playlist": True,
             "no_warnings": False,
             "quiet": True,
@@ -82,14 +82,7 @@ class YtDlpChannelVideoProvider:
         url = f"https://www.youtube.com/channel/{channel_id}/videos"
         with YoutubeDL(options) as ydl:
             info = ydl.extract_info(url, download=False)
-        entries = [entry for entry in (info or {}).get("entries", []) if entry]
-        videos = [
-            video
-            for entry in entries
-            if (video := normalize_video(entry, channel_id)) is not None
-        ]
-        return VideoBatch(
-            enumerated_entries=len(entries),
-            videos=videos,
-            skipped_entries=len(entries) - len(videos),
-        )
+            if info is None:
+                raise RuntimeError("yt-dlp returned no channel data")
+            for entry in info.get("entries", []):
+                yield normalize_video(entry, channel_id) if entry else None
