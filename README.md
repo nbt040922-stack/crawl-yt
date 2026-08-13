@@ -1,6 +1,6 @@
 # crawl-yt
 
-Nen tang Phase 2A cho YouTube Intelligence Engine. Du an tim channel, liet ke
+Nen tang Phase 2B cho YouTube Intelligence Engine. Du an tim channel, liet ke
 video, bo sung metadata va luu transcript theo timestamp. YouTube captions la
 duong mac dinh re; audio va ASR cuc bo luon la fallback dat tien, phai bat ro.
 
@@ -22,7 +22,7 @@ python -m pip install -e ".[asr]"
 Lenh tren cai `faster-whisper` vao virtualenv cua project. Khong can thay doi
 CUDA driver/toolkit he thong.
 
-## Lenh Phase 2A
+## Lenh Phase 2B
 
 ```powershell
 python main.py doctor
@@ -35,6 +35,9 @@ python main.py crawl UCxxxxxxxxxxxx --full
 python main.py crawl UCxxxxxxxxxxxx --known-stop-threshold 5
 python main.py crawl-due --limit 20
 python main.py crawl-all --max-channels 3 --limit-per-channel 10
+python main.py score-channel UCxxxxxxxxxxxx
+python main.py score-all --limit 100
+python main.py top-channels --limit 20
 python main.py enrich VIDEO_ID
 python main.py enrich-channel UCxxxxxxxxxxxx --limit 20
 python main.py enrich-pending --limit 50
@@ -67,6 +70,22 @@ dung ma khong tao list hang nghin video trong bo nho.
 va tiep tuc neu mot channel loi. Khoang lap Phase 2A mac dinh la 24 gio; khong
 co scheduler nen lenh khong tu chay. `crawl-all` duoc giu de tuong thich, con
 `crawl-due` la lua chon van hanh uu tien.
+
+Scoring v1 hoan toan deterministic va chi doc SQLite cuc bo; khong goi YouTube,
+LLM hay dich vu tra phi. `score-channel` tinh mot kenh, `score-all` bat buoc co
+limit, va `top-channels` hien bang xep hang ngan gon. Cong thuc 0-100:
+
+- relevance 35%: so discovery keyword duy nhat, tang co gioi han;
+- activity 30%: video moi nhat va so video trong 30/90 ngay;
+- traction 20%: channel counts va median view cua it nhat 3 video enriched,
+  dung log scaling;
+- confidence 15%: coverage metadata, video quan sat, publication date va
+  enriched metadata.
+
+Tier `high` tu 70, `medium` tu 40, con lai la `low`. Sau mot crawl thanh cong,
+tier quyet dinh lan tiep theo: high 12 gio, medium 24 gio, low 72 gio, unscored
+24 gio. Scoring chi thay doi uu tien; khong xoa channel. Khi activity/traction
+thieu, v1 dung diem neutral va ha confidence thay vi coi NULL la 0.
 
 Enumeration la thao tac nhe: yt-dlp doc flat upload list, khong fetch full tung
 video. Enrichment nang hon: moi video tao mot full metadata request nhung van

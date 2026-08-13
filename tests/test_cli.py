@@ -80,6 +80,17 @@ class CliTests(unittest.TestCase):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             build_parser().parse_args(["transcript-pending"])
 
+    def test_scoring_argument_parsing_and_required_limits(self) -> None:
+        self.assertEqual(
+            build_parser().parse_args(["score-channel", "UC123"]).channel, "UC123"
+        )
+        for command in ("score-all", "top-channels"):
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                build_parser().parse_args([command])
+            self.assertEqual(
+                build_parser().parse_args([command, "--limit", "20"]).limit, 20
+            )
+
     def test_dry_run_does_not_persist(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = ChannelRepository(Path(directory) / "test.db")

@@ -44,6 +44,20 @@ class ChannelCrawlState:
 
 
 @dataclass(slots=True)
+class ChannelScore:
+    channel_id: str
+    score: float
+    relevance_score: float
+    activity_score: float
+    traction_score: float
+    confidence_score: float
+    tier: str
+    reasons: dict[str, Any]
+    scored_at: datetime
+    scoring_version: str
+
+
+@dataclass(slots=True)
 class Video:
     video_id: str
     channel_id: str

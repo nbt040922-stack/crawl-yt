@@ -12,6 +12,7 @@ from pathlib import Path
 from .models import (
     Channel,
     ChannelCrawlState,
+    ChannelScore,
     ChannelDiscovery,
     Transcript,
     TranscriptAttempt,
@@ -160,6 +161,26 @@ class ChannelRepository:
                     ON channel_crawl_state(next_crawl_at);
                 CREATE INDEX IF NOT EXISTS idx_channel_crawl_state_last_success_at
                     ON channel_crawl_state(last_success_at);
+                CREATE TABLE IF NOT EXISTS channel_scores (
+                    channel_id TEXT PRIMARY KEY,
+                    score REAL NOT NULL,
+                    relevance_score REAL NOT NULL,
+                    activity_score REAL NOT NULL,
+                    traction_score REAL NOT NULL,
+                    confidence_score REAL NOT NULL,
+                    tier TEXT NOT NULL CHECK (tier IN ('high', 'medium', 'low', 'unscored')),
+                    reason_json TEXT NOT NULL,
+                    scored_at TEXT NOT NULL,
+                    scoring_version TEXT NOT NULL,
+                    FOREIGN KEY (channel_id) REFERENCES channels(channel_id)
+                        ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_channel_scores_score
+                    ON channel_scores(score);
+                CREATE INDEX IF NOT EXISTS idx_channel_scores_tier
+                    ON channel_scores(tier);
+                CREATE INDEX IF NOT EXISTS idx_channel_scores_scored_at
+                    ON channel_scores(scored_at);
                 """
             )
             video_columns = {
@@ -361,6 +382,168 @@ class ChannelRepository:
 
 
 class VideoRepository(ChannelRepository):
+    def upsert_channel_score(self, score: ChannelScore) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO channel_scores (
+                    channel_id, score, relevance_score, activity_score,
+                    traction_score, confidence_score, tier, reason_json,
+                    scored_at, scoring_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(channel_id) DO UPDATE SET
+                    score = excluded.score,
+                    relevance_score = excluded.relevance_score,
+                    activity_score = excluded.activity_score,
+                    traction_score = excluded.traction_score,
+                    confidence_score = excluded.confidence_score,
+                    tier = excluded.tier,
+                    reason_json = excluded.reason_json,
+                    scored_at = excluded.scored_at,
+                    scoring_version = excluded.scoring_version
+                """,
+                (
+                    score.channel_id,
+                    score.score,
+                    score.relevance_score,
+                    score.activity_score,
+                    score.traction_score,
+                    score.confidence_score,
+                    score.tier,
+                    json.dumps(score.reasons, ensure_ascii=False),
+                    self._timestamp(score.scored_at),
+                    score.scoring_version,
+                ),
+            )
+
+    def get_channel_score(self, channel_id: str) -> ChannelScore | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM channel_scores WHERE channel_id = ?", (channel_id,)
+            ).fetchone()
+        return self._channel_score(row) if row else None
+
+    def list_top_channels(
+        self, limit: int, tier: str | None = None
+    ) -> list[tuple[Channel, ChannelScore]]:
+        sql = """
+            SELECT c.*, s.score AS scored_score, s.relevance_score,
+                   s.activity_score, s.traction_score, s.confidence_score,
+                   s.tier, s.reason_json, s.scored_at, s.scoring_version
+            FROM channel_scores AS s
+            JOIN channels AS c ON c.channel_id = s.channel_id
+        """
+        parameters: list[object] = []
+        if tier is not None:
+            sql += " WHERE s.tier = ?"
+            parameters.append(tier)
+        sql += " ORDER BY s.score DESC, c.channel_id LIMIT ?"
+        parameters.append(limit)
+        with self._connect() as connection:
+            rows = connection.execute(sql, parameters).fetchall()
+        return [
+            (self._channel(row), self._channel_score(row, score_column="scored_score"))
+            for row in rows
+        ]
+
+    def count_channels_by_score_tier(self) -> dict[str, int]:
+        counts = {"high": 0, "medium": 0, "low": 0, "unscored": 0}
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT tier, COUNT(*) FROM channel_scores GROUP BY tier"
+            ).fetchall()
+            total = connection.execute("SELECT COUNT(*) FROM channels").fetchone()[0]
+        for tier, count in rows:
+            counts[str(tier)] = int(count)
+        counts["unscored"] += int(total) - sum(int(row[1]) for row in rows)
+        return counts
+
+    def list_unscored_channels(self, limit: int) -> list[Channel]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT c.* FROM channels AS c
+                LEFT JOIN channel_scores AS s ON s.channel_id = c.channel_id
+                WHERE s.channel_id IS NULL
+                ORDER BY c.channel_id LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [self._channel(row) for row in rows]
+
+    def get_channel_scoring_signals(
+        self, channel_id: str, now: datetime
+    ) -> dict[str, object] | None:
+        cutoff_30 = self._timestamp(now - timedelta(days=30))
+        cutoff_90 = self._timestamp(now - timedelta(days=90))
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT c.*,
+                    (SELECT COUNT(DISTINCT keyword) FROM channel_discoveries
+                     WHERE channel_id = c.channel_id) AS discovery_keywords,
+                    (SELECT COUNT(*) FROM videos
+                     WHERE channel_id = c.channel_id) AS observed_videos,
+                    (SELECT COUNT(*) FROM videos WHERE channel_id = c.channel_id
+                     AND published_at IS NOT NULL) AS published_videos,
+                    (SELECT MAX(published_at) FROM videos
+                     WHERE channel_id = c.channel_id) AS latest_published_at,
+                    (SELECT COUNT(*) FROM videos WHERE channel_id = c.channel_id
+                     AND published_at >= ?) AS videos_last_30d,
+                    (SELECT COUNT(*) FROM videos WHERE channel_id = c.channel_id
+                     AND published_at >= ?) AS videos_last_90d,
+                    (SELECT COUNT(*) FROM videos WHERE channel_id = c.channel_id
+                     AND metadata_enriched_at IS NOT NULL) AS enriched_videos
+                FROM channels AS c WHERE c.channel_id = ?
+                """,
+                (cutoff_30, cutoff_90, channel_id),
+            ).fetchone()
+            if row is None:
+                return None
+            views = [
+                int(item[0])
+                for item in connection.execute(
+                    """
+                    SELECT view_count FROM videos
+                    WHERE channel_id = ? AND metadata_enriched_at IS NOT NULL
+                      AND view_count IS NOT NULL
+                    """,
+                    (channel_id,),
+                ).fetchall()
+            ]
+        return {
+            "channel": self._channel(row),
+            "discovery_keywords": int(row["discovery_keywords"]),
+            "observed_videos": int(row["observed_videos"]),
+            "published_videos": int(row["published_videos"]),
+            "latest_published_at": (
+                datetime.fromisoformat(row["latest_published_at"])
+                if row["latest_published_at"]
+                else None
+            ),
+            "videos_last_30d": int(row["videos_last_30d"]),
+            "videos_last_90d": int(row["videos_last_90d"]),
+            "enriched_videos": int(row["enriched_videos"]),
+            "enriched_view_counts": views,
+        }
+
+    @staticmethod
+    def _channel_score(
+        row: sqlite3.Row, score_column: str = "score"
+    ) -> ChannelScore:
+        return ChannelScore(
+            channel_id=row["channel_id"],
+            score=float(row[score_column]),
+            relevance_score=float(row["relevance_score"]),
+            activity_score=float(row["activity_score"]),
+            traction_score=float(row["traction_score"]),
+            confidence_score=float(row["confidence_score"]),
+            tier=row["tier"],
+            reasons=json.loads(row["reason_json"]),
+            scored_at=datetime.fromisoformat(row["scored_at"]),
+            scoring_version=row["scoring_version"],
+        )
+
     def get_channel_crawl_state(
         self, channel_id: str
     ) -> ChannelCrawlState | None:

@@ -9,6 +9,7 @@ from typing import Iterable, Protocol
 
 from ..database.models import Video
 from ..database.repository import VideoRepository
+from ..discovery.channel_scoring import CrawlPriorityPolicy
 
 
 class ChannelVideoProvider(Protocol):
@@ -55,10 +56,12 @@ class ChannelCrawlService:
         provider: ChannelVideoProvider,
         repository: VideoRepository,
         crawl_interval: timedelta = timedelta(hours=24),
+        priority_policy: CrawlPriorityPolicy | None = None,
     ) -> None:
         self.provider = provider
         self.repository = repository
         self.crawl_interval = crawl_interval
+        self.priority_policy = priority_policy or CrawlPriorityPolicy()
 
     def crawl(
         self,
@@ -114,11 +117,15 @@ class ChannelCrawlService:
                 channel_id, str(error), crawl_interval=self.crawl_interval
             )
             raise
+        channel_score = self.repository.get_channel_score(channel_id)
+        interval = self.priority_policy.interval_for(
+            channel_score.tier if channel_score else None
+        )
         self.repository.mark_crawl_success(
             channel_id,
             last_seen.video_id if last_seen else None,
             last_seen.published_at if last_seen else None,
-            crawl_interval=self.crawl_interval,
+            crawl_interval=interval,
         )
         report.elapsed_seconds = perf_counter() - started
         return report

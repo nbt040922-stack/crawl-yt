@@ -29,6 +29,7 @@ from .collectors.ytdlp_video_metadata import YtDlpVideoMetadataProvider
 from .config import Config
 from .database.repository import ChannelRepository, TranscriptRepository, VideoRepository
 from .discovery.channel_discovery import ChannelDiscoveryProvider, DiscoveryService
+from .discovery.channel_scoring import ChannelScoringService, CrawlPriorityPolicy
 from .discovery.ytdlp_provider import YtDlpDiscoveryProvider
 from .transcripts.opencli_provider import OpenCliTranscriptProvider
 from .transcripts.provider import (
@@ -179,6 +180,10 @@ def stats(
     print(f"  due: {crawl_counts['due']}")
     print(f"  healthy: {crawl_counts['healthy']}")
     print(f"  failing: {crawl_counts['failing']}")
+    score_counts = database.count_channels_by_score_tier()
+    print("Channel scores:")
+    for tier in ("high", "medium", "low", "unscored"):
+        print(f"  {tier}: {score_counts[tier]}")
     print(f"Metadata enriched: {database.count_enriched_videos()}")
     print(f"Metadata pending: {database.count_videos_needing_enrichment()}")
     print(f"Transcripts: {database.count_transcripts()}")
@@ -301,6 +306,72 @@ def crawl_due(
     for channel_id, error in report.failures:
         print(f"  {channel_id}: {error}")
     return 1 if report.failures else 0
+
+
+def _print_score(channel_title: str, score) -> None:
+    print(f"Channel: {channel_title} ({score.channel_id})")
+    print(f"Score: {score.score:.2f}")
+    print(f"Tier: {score.tier}")
+    print(
+        "Components: "
+        f"relevance={score.relevance_score:.2f}, "
+        f"activity={score.activity_score:.2f}, "
+        f"traction={score.traction_score:.2f}, "
+        f"confidence={score.confidence_score:.2f}"
+    )
+    print(
+        f"Crawl interval: {CrawlPriorityPolicy().interval_for(score.tier).total_seconds() / 3600:.0f}h"
+    )
+    notes = score.reasons.get("notes", [])
+    if notes:
+        print(f"Reasons: {'; '.join(notes)}")
+
+
+def score_channel(
+    args: argparse.Namespace,
+    _: ChannelDiscoveryProvider | None = None,
+    __: ChannelVideoProvider | None = None,
+    ___: VideoMetadataProvider | None = None,
+    ____: TranscriptProvider | None = None,
+    repository: ChannelRepository | None = None,
+) -> int:
+    database = _video_repository(repository)
+    channel_id = _channel_id(args.channel)
+    try:
+        score = ChannelScoringService(database).score_channel(channel_id)
+    except ValueError as error:
+        print(f"Scoring failed: {error}", file=sys.stderr)
+        return 1
+    _print_score(database.get_channel(channel_id).title, score)
+    return 0
+
+
+def score_all(
+    args: argparse.Namespace,
+    _: ChannelDiscoveryProvider | None = None,
+    __: ChannelVideoProvider | None = None,
+    ___: VideoMetadataProvider | None = None,
+    ____: TranscriptProvider | None = None,
+    repository: ChannelRepository | None = None,
+) -> int:
+    scores = ChannelScoringService(_video_repository(repository)).score_all(args.limit)
+    print(f"Channels scored: {len(scores)}")
+    return 0
+
+
+def top_channels(
+    args: argparse.Namespace,
+    _: ChannelDiscoveryProvider | None = None,
+    __: ChannelVideoProvider | None = None,
+    ___: VideoMetadataProvider | None = None,
+    ____: TranscriptProvider | None = None,
+    repository: ChannelRepository | None = None,
+) -> int:
+    rows = _video_repository(repository).list_top_channels(args.limit)
+    print("Score  Tier    Channel")
+    for channel, score in rows:
+        print(f"{score.score:5.1f}  {score.tier:<7} {channel.title}")
+    return 0
 
 
 def _metadata_service(
@@ -536,6 +607,22 @@ def build_parser() -> argparse.ArgumentParser:
     crawl_all_parser.add_argument("--max-channels", type=positive_int)
     crawl_all_parser.add_argument("--limit-per-channel", type=positive_int)
     crawl_all_parser.set_defaults(handler=crawl_all)
+
+    score_channel_parser = subparsers.add_parser(
+        "score-channel", help="Tinh diem mot kenh"
+    )
+    score_channel_parser.add_argument("channel")
+    score_channel_parser.set_defaults(handler=score_channel)
+
+    score_all_parser = subparsers.add_parser("score-all", help="Tinh diem cac kenh")
+    score_all_parser.add_argument("--limit", type=positive_int, required=True)
+    score_all_parser.set_defaults(handler=score_all)
+
+    top_channels_parser = subparsers.add_parser(
+        "top-channels", help="Hien thi kenh co diem cao"
+    )
+    top_channels_parser.add_argument("--limit", type=positive_int, required=True)
+    top_channels_parser.set_defaults(handler=top_channels)
 
     enrich_parser = subparsers.add_parser("enrich", help="Bo sung metadata video")
     enrich_parser.add_argument("video_id")
