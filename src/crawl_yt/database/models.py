@@ -16,10 +16,15 @@ class Channel:
     subscriber_count: int | None = None
     video_count: int | None = None
     view_count: int | None = None
-    discovery_keyword: str | None = None
-    discovered_at: datetime | None = None
     last_checked_at: datetime | None = None
-    discovery_source: str | None = None
+
+
+@dataclass(slots=True)
+class ChannelDiscovery:
+    channel_id: str
+    keyword: str
+    source: str
+    discovered_at: datetime
 
 
 @dataclass(slots=True)

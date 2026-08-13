@@ -18,7 +18,8 @@ class FakeProvider:
     def search(self, keyword: str, limit: int) -> DiscoveryBatch:
         return DiscoveryBatch(
             search_results=2,
-            channels=[Channel("UC1", "One", discovery_keyword=keyword)],
+            channels=[Channel("UC1", "One")],
+            source="test",
         )
 
 
@@ -43,6 +44,7 @@ class CliTests(unittest.TestCase):
                 )
             self.assertEqual(result, 0)
             self.assertEqual(repository.count_channels(), 0)
+            self.assertEqual(repository.count_discovery_relationships(), 0)
             self.assertIn("Dry run", output.getvalue())
 
 

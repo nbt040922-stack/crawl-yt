@@ -11,9 +11,12 @@ from ..database.models import Channel
 from .channel_discovery import DiscoveryBatch
 
 
-def normalize_channel(entry: dict[str, Any], keyword: str) -> Channel | None:
-    channel_id = entry.get("channel_id") or entry.get("uploader_id")
+def normalize_channel(entry: dict[str, Any]) -> Channel | None:
+    channel_id = entry.get("channel_id")
     if not channel_id:
+        uploader_id = entry.get("uploader_id")
+        channel_id = uploader_id if str(uploader_id or "").startswith("UC") else None
+    if not str(channel_id or "").startswith("UC"):
         return None
     channel_id = str(channel_id)
     title = entry.get("channel") or entry.get("uploader") or channel_id
@@ -30,10 +33,7 @@ def normalize_channel(entry: dict[str, Any], keyword: str) -> Channel | None:
         title=str(title),
         channel_url=url,
         subscriber_count=entry.get("channel_follower_count"),
-        discovery_keyword=keyword,
-        discovered_at=now,
         last_checked_at=now,
-        discovery_source="yt-dlp:ytsearch",
     )
 
 
@@ -52,6 +52,10 @@ class YtDlpDiscoveryProvider:
         channels = [
             channel
             for entry in entries
-            if (channel := normalize_channel(entry, keyword)) is not None
+            if (channel := normalize_channel(entry)) is not None
         ]
-        return DiscoveryBatch(search_results=len(entries), channels=channels)
+        return DiscoveryBatch(
+            search_results=len(entries),
+            channels=channels,
+            source="yt-dlp:ytsearch",
+        )

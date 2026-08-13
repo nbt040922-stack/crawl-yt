@@ -1,4 +1,4 @@
-"""SQLite channel repository tests."""
+"""SQLite channel and discovery provenance tests."""
 
 from __future__ import annotations
 
@@ -27,18 +27,19 @@ class RepositoryTests(unittest.TestCase):
             channel_id="UC123",
             title=title,
             channel_url="https://www.youtube.com/channel/UC123",
-            discovery_keyword="retirement",
-            discovered_at=datetime.now(timezone.utc),
-            discovery_source="test",
+            last_checked_at=datetime.now(timezone.utc),
         )
 
     def test_database_creation(self) -> None:
         self.assertTrue(self.database_path.is_file())
         with closing(sqlite3.connect(self.database_path)) as connection:
-            table = connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='channels'"
-            ).fetchone()
-        self.assertEqual(table, ("channels",))
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+        self.assertTrue({"channels", "channel_discoveries"} <= tables)
 
     def test_channel_upsert_and_get(self) -> None:
         self.assertTrue(self.repository.upsert_channel(self.channel()))
@@ -52,10 +53,44 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(self.repository.count_channels(), 1)
         self.assertEqual(self.repository.get_channel("UC123").title, "Updated")
 
-    def test_count_channels(self) -> None:
-        self.assertEqual(self.repository.count_channels(), 0)
+    def test_one_channel_can_have_multiple_keywords(self) -> None:
         self.repository.upsert_channel(self.channel())
-        self.assertEqual(self.repository.count_channels(), 1)
+        self.assertTrue(
+            self.repository.record_discovery("UC123", "retirement", "test")
+        )
+        self.assertTrue(
+            self.repository.record_discovery("UC123", "social security", "test")
+        )
+        discoveries = self.repository.list_discoveries_for_channel("UC123")
+        self.assertEqual({item.keyword for item in discoveries}, {"retirement", "social security"})
+
+    def test_duplicate_discovery_relationship_is_ignored(self) -> None:
+        self.repository.upsert_channel(self.channel())
+        self.assertTrue(
+            self.repository.record_discovery("UC123", "retirement", "test")
+        )
+        self.assertFalse(
+            self.repository.record_discovery("UC123", "retirement", "test")
+        )
+        self.assertEqual(self.repository.count_discovery_relationships(), 1)
+
+    def test_discovery_keyword_counts(self) -> None:
+        self.repository.upsert_channel(self.channel())
+        self.repository.upsert_channel(Channel("UC456", "Second"))
+        self.repository.record_discovery("UC123", "retirement", "test")
+        self.repository.record_discovery("UC123", "social security", "test")
+        self.repository.record_discovery("UC456", "retirement", "test")
+        self.assertEqual(
+            self.repository.discovery_keyword_counts(),
+            [("retirement", 2), ("social security", 1)],
+        )
+        self.assertEqual(self.repository.count_channels_for_keyword("retirement"), 2)
+
+    def test_foreign_keys_are_enabled_and_enforced(self) -> None:
+        with self.repository._connect() as connection:
+            self.assertEqual(connection.execute("PRAGMA foreign_keys").fetchone()[0], 1)
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.repository.record_discovery("UC-missing", "retirement", "test")
 
 
 if __name__ == "__main__":

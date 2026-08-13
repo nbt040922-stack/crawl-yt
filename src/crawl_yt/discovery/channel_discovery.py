@@ -13,6 +13,7 @@ from ..database.repository import ChannelRepository
 class DiscoveryBatch:
     search_results: int
     channels: list[Channel]
+    source: str
 
 
 class ChannelDiscoveryProvider(Protocol):
@@ -22,9 +23,12 @@ class ChannelDiscoveryProvider(Protocol):
 @dataclass(slots=True)
 class DiscoveryReport:
     search_results: int
-    unique_channels: int
-    persisted: int
-    duplicates: int
+    unique_channels_in_search: int
+    duplicate_results_in_search: int
+    new_channels: int
+    existing_channels: int
+    new_discovery_relationships: int
+    existing_discovery_relationships: int
     channels: list[Channel]
 
 
@@ -40,19 +44,32 @@ class DiscoveryService:
     ) -> DiscoveryReport:
         batch = self.provider.search(keyword, limit)
         unique = {channel.channel_id: channel for channel in batch.channels}
-        result_duplicates = len(batch.channels) - len(unique)
-        persisted = 0
-        existing = 0
-        if not dry_run:
-            for channel in unique.values():
-                if self.repository.upsert_channel(channel):
-                    persisted += 1
-                else:
-                    existing += 1
+        new_channels = existing_channels = 0
+        new_relationships = existing_relationships = 0
+
+        for channel in unique.values():
+            if dry_run:
+                is_new_channel = self.repository.get_channel(channel.channel_id) is None
+                is_new_relationship = not self.repository.discovery_exists(
+                    channel.channel_id, keyword, batch.source
+                )
+            else:
+                is_new_channel = self.repository.upsert_channel(channel)
+                is_new_relationship = self.repository.record_discovery(
+                    channel.channel_id, keyword, batch.source
+                )
+            new_channels += is_new_channel
+            existing_channels += not is_new_channel
+            new_relationships += is_new_relationship
+            existing_relationships += not is_new_relationship
+
         return DiscoveryReport(
             search_results=batch.search_results,
-            unique_channels=len(unique),
-            persisted=persisted,
-            duplicates=result_duplicates + existing,
+            unique_channels_in_search=len(unique),
+            duplicate_results_in_search=len(batch.channels) - len(unique),
+            new_channels=new_channels,
+            existing_channels=existing_channels,
+            new_discovery_relationships=new_relationships,
+            existing_discovery_relationships=existing_relationships,
             channels=list(unique.values()),
         )

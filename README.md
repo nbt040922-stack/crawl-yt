@@ -1,6 +1,6 @@
 # crawl-yt
 
-Nen tang Phase 1A cho YouTube Intelligence Engine. Phien ban hien tai tim cac
+Nen tang Phase 1A.1 cho YouTube Intelligence Engine. Phien ban hien tai tim cac
 video theo tu khoa bang yt-dlp, rut ra cac kenh duy nhat va luu chung vao SQLite.
 Chua co video crawling, transcript hay phan tich.
 
@@ -27,7 +27,10 @@ python main.py stats
 Mac dinh `discover` xem toi da 50 ket qua video. `--dry-run` thuc hien discovery
 nhung khong ghi channel vao database.
 
-Database mac dinh la `data/crawl_yt.db`. Co the doi bang bien moi truong:
+Database mac dinh la `data/crawl_yt.db`. Channel metadata canonical duoc luu
+trong `channels`; moi quan he channel/keyword/source duoc luu rieng trong
+`channel_discoveries`, nen mot channel co the duoc tim thay boi nhieu tu khoa.
+Co the doi database bang bien moi truong:
 
 ```powershell
 $env:DATABASE_URL = "sqlite:///data/another.db"
@@ -43,8 +46,8 @@ python -m unittest discover -s tests -v
 
 ## Metadata hien tai
 
-Discovery luu `channel_id`, ten kenh, URL kenh, tu khoa va nguon discovery khi
-yt-dlp cung cap. Subscriber count duoc luu neu co san trong search result.
+Discovery chi chap nhan YouTube channel ID on dinh dang `UC...`; uploader handle
+mo ho bi bo qua. Subscriber count duoc luu neu co san trong search result.
 Description, video count va view count co the de `NULL`; cac truong nay se duoc
 bo sung sau qua YouTube Data API thay vi goi them mot request cho moi kenh.
 

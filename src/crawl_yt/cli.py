@@ -88,9 +88,15 @@ def discover(
         print(f"Discovery failed: {error}", file=sys.stderr)
         return 1
     print(f"Search results: {report.search_results}")
-    print(f"Unique channels: {report.unique_channels}")
-    print(f"Persisted: {report.persisted}")
-    print(f"Duplicates: {report.duplicates}")
+    print(f"Unique channels in search: {report.unique_channels_in_search}")
+    print(f"Duplicate results in search: {report.duplicate_results_in_search}")
+    print(f"New channels: {report.new_channels}")
+    print(f"Existing channels: {report.existing_channels}")
+    print(f"New discovery relationships: {report.new_discovery_relationships}")
+    print(
+        "Existing discovery relationships: "
+        f"{report.existing_discovery_relationships}"
+    )
     if args.dry_run:
         print("Dry run: database was not changed")
     return 0
@@ -107,6 +113,7 @@ def stats(
     print(f"Channels: {database.count_channels()}")
     print("Videos: 0")
     print("Transcripts: 0")
+    print(f"Discovery relationships: {database.count_discovery_relationships()}")
     keyword_counts = database.discovery_keyword_counts()
     if keyword_counts:
         print()
