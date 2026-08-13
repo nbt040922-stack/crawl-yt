@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .models import Channel, ChannelDiscovery, Video
+from .models import Channel, ChannelDiscovery, Transcript, Video
 
 
 class ChannelRepository:
@@ -94,6 +94,25 @@ class ChannelRepository:
                     ON videos(channel_id);
                 CREATE INDEX IF NOT EXISTS idx_videos_published_at
                     ON videos(published_at);
+                CREATE TABLE IF NOT EXISTS transcripts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    video_id TEXT NOT NULL,
+                    language TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    segments_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (video_id) REFERENCES videos(video_id)
+                        ON DELETE CASCADE,
+                    UNIQUE (video_id, language, source)
+                );
+                CREATE INDEX IF NOT EXISTS idx_transcripts_video_id
+                    ON transcripts(video_id);
+                CREATE INDEX IF NOT EXISTS idx_transcripts_language
+                    ON transcripts(language);
+                CREATE INDEX IF NOT EXISTS idx_transcripts_source
+                    ON transcripts(source);
                 """
             )
             video_columns = {
@@ -492,4 +511,148 @@ class VideoRepository(ChannelRepository):
                 if row["metadata_enriched_at"]
                 else None
             ),
+        )
+
+
+class TranscriptRepository(VideoRepository):
+    def upsert_transcript(self, transcript: Transcript) -> bool:
+        now = datetime.now(timezone.utc)
+        created_at = transcript.created_at or now
+        updated_at = transcript.updated_at or now
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO transcripts (
+                    video_id, language, source, text, segments_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    transcript.video_id,
+                    transcript.language,
+                    transcript.source,
+                    transcript.text,
+                    json.dumps(transcript.segments, ensure_ascii=False),
+                    self._timestamp(created_at),
+                    self._timestamp(updated_at),
+                ),
+            )
+            inserted = cursor.rowcount == 1
+            if not inserted:
+                connection.execute(
+                    """
+                    UPDATE transcripts SET text = ?, segments_json = ?, updated_at = ?
+                    WHERE video_id = ? AND language = ? AND source = ?
+                    """,
+                    (
+                        transcript.text,
+                        json.dumps(transcript.segments, ensure_ascii=False),
+                        self._timestamp(updated_at),
+                        transcript.video_id,
+                        transcript.language,
+                        transcript.source,
+                    ),
+                )
+        return inserted
+
+    def get_transcript(
+        self,
+        video_id: str,
+        language: str | None = None,
+        source: str | None = None,
+    ) -> Transcript | None:
+        sql = "SELECT * FROM transcripts WHERE video_id = ?"
+        parameters: list[object] = [video_id]
+        if language is not None:
+            sql += " AND language = ?"
+            parameters.append(language)
+        if source is not None:
+            sql += " AND source = ?"
+            parameters.append(source)
+        sql += """
+            ORDER BY CASE source WHEN 'youtube_manual' THEN 0 ELSE 1 END,
+                     updated_at DESC LIMIT 1
+        """
+        with self._connect() as connection:
+            row = connection.execute(sql, parameters).fetchone()
+        return self._transcript(row) if row else None
+
+    def list_transcripts_for_video(self, video_id: str) -> list[Transcript]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM transcripts WHERE video_id = ?
+                ORDER BY language,
+                    CASE source WHEN 'youtube_manual' THEN 0 ELSE 1 END
+                """,
+                (video_id,),
+            ).fetchall()
+        return [self._transcript(row) for row in rows]
+
+    def transcript_exists(
+        self,
+        video_id: str,
+        language: str | None = None,
+        source: str | None = None,
+    ) -> bool:
+        return self.get_transcript(video_id, language, source) is not None
+
+    def count_transcripts(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute("SELECT COUNT(*) FROM transcripts").fetchone()
+        return int(row[0])
+
+    def count_videos_with_transcripts(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(DISTINCT video_id) FROM transcripts"
+            ).fetchone()
+        return int(row[0])
+
+    def count_videos_without_transcripts(self) -> int:
+        return self.count_videos() - self.count_videos_with_transcripts()
+
+    def list_videos_needing_transcript(
+        self,
+        channel_id: str | None = None,
+        limit: int | None = None,
+        languages: tuple[str, ...] | None = None,
+    ) -> list[Video]:
+        sql = "SELECT v.* FROM videos AS v WHERE NOT EXISTS (SELECT 1 FROM transcripts AS t WHERE t.video_id = v.video_id"
+        parameters: list[object] = []
+        if languages:
+            language_clauses: list[str] = []
+            seen: set[tuple[str, str]] = set()
+            for language in languages:
+                normalized = language.lower()
+                pair = (normalized, f"{normalized.split('-', 1)[0]}-%")
+                if pair not in seen:
+                    seen.add(pair)
+                    language_clauses.append(
+                        "(lower(t.language) = ? OR lower(t.language) LIKE ?)"
+                    )
+                    parameters.extend(pair)
+            sql += " AND (" + " OR ".join(language_clauses) + ")"
+        sql += ")"
+        if channel_id is not None:
+            sql += " AND v.channel_id = ?"
+            parameters.append(channel_id)
+        sql += " ORDER BY v.first_seen_at, v.video_id"
+        if limit is not None:
+            sql += " LIMIT ?"
+            parameters.append(limit)
+        with self._connect() as connection:
+            rows = connection.execute(sql, parameters).fetchall()
+        return [self._video(row) for row in rows]
+
+    @staticmethod
+    def _transcript(row: sqlite3.Row) -> Transcript:
+        return Transcript(
+            video_id=row["video_id"],
+            language=row["language"],
+            source=row["source"],
+            text=row["text"],
+            segments=json.loads(row["segments_json"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
         )

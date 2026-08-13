@@ -55,6 +55,22 @@ class CliTests(unittest.TestCase):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             build_parser().parse_args(["enrich-pending"])
 
+    def test_transcript_argument_parsing_and_required_limits(self) -> None:
+        single = build_parser().parse_args(
+            ["transcript", "video-1", "--lang", "en", "--force"]
+        )
+        self.assertEqual(single.video_id, "video-1")
+        self.assertEqual(single.lang, "en")
+        self.assertTrue(single.force)
+        channel = build_parser().parse_args(
+            ["transcript-channel", "UC123", "--limit", "20", "--lang", "en"]
+        )
+        self.assertEqual(channel.limit, 20)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            build_parser().parse_args(["transcript-channel", "UC123"])
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            build_parser().parse_args(["transcript-pending"])
+
     def test_dry_run_does_not_persist(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = ChannelRepository(Path(directory) / "test.db")

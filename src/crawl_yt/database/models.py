@@ -58,3 +58,4 @@ class Transcript:
     text: str
     segments: list[dict[str, Any]] = field(default_factory=list)
     created_at: datetime | None = None
+    updated_at: datetime | None = None

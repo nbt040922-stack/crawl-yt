@@ -29,6 +29,13 @@ from .config import Config
 from .database.repository import ChannelRepository, VideoRepository
 from .discovery.channel_discovery import ChannelDiscoveryProvider, DiscoveryService
 from .discovery.ytdlp_provider import YtDlpDiscoveryProvider
+from .database.repository import TranscriptRepository
+from .transcripts.provider import (
+    TranscriptBatchReport,
+    TranscriptProvider,
+    TranscriptService,
+)
+from .transcripts.ytdlp_provider import YtDlpTranscriptProvider
 
 
 def _version(command: str, *args: str) -> str | None:
@@ -62,11 +69,22 @@ def _video_repository(
     return VideoRepository(repository.database_path if repository else _database_path())
 
 
+def _transcript_repository(
+    repository: ChannelRepository | None = None,
+) -> TranscriptRepository:
+    if isinstance(repository, TranscriptRepository):
+        return repository
+    return TranscriptRepository(
+        repository.database_path if repository else _database_path()
+    )
+
+
 def doctor(
     _: argparse.Namespace,
     __: ChannelDiscoveryProvider | None = None,
     ___: ChannelVideoProvider | None = None,
     ____: VideoMetadataProvider | None = None,
+    _____: TranscriptProvider | None = None,
     repository: ChannelRepository | None = None,
 ) -> int:
     try:
@@ -102,6 +120,7 @@ def discover(
     provider: ChannelDiscoveryProvider | None = None,
     _: ChannelVideoProvider | None = None,
     __: VideoMetadataProvider | None = None,
+    ___: TranscriptProvider | None = None,
     repository: ChannelRepository | None = None,
 ) -> int:
     service = DiscoveryService(
@@ -132,16 +151,21 @@ def stats(
     __: ChannelDiscoveryProvider | None = None,
     ___: ChannelVideoProvider | None = None,
     ____: VideoMetadataProvider | None = None,
+    _____: TranscriptProvider | None = None,
     repository: ChannelRepository | None = None,
 ) -> int:
-    database = _video_repository(repository)
+    database = _transcript_repository(repository)
     print(f"Database: {database.database_path}")
     print()
     print(f"Channels: {database.count_channels()}")
     print(f"Videos: {database.count_videos()}")
     print(f"Metadata enriched: {database.count_enriched_videos()}")
     print(f"Metadata pending: {database.count_videos_needing_enrichment()}")
-    print("Transcripts: 0")
+    print(f"Transcripts: {database.count_transcripts()}")
+    print(f"Videos with transcript: {database.count_videos_with_transcripts()}")
+    print(
+        f"Videos without transcript: {database.count_videos_without_transcripts()}"
+    )
     print(f"Discovery relationships: {database.count_discovery_relationships()}")
     keyword_counts = database.discovery_keyword_counts()
     if keyword_counts:
@@ -175,6 +199,7 @@ def crawl(
     _: ChannelDiscoveryProvider | None = None,
     provider: ChannelVideoProvider | None = None,
     __: VideoMetadataProvider | None = None,
+    ___: TranscriptProvider | None = None,
     repository: ChannelRepository | None = None,
 ) -> int:
     service = ChannelCrawlService(
@@ -197,6 +222,7 @@ def crawl_all(
     _: ChannelDiscoveryProvider | None = None,
     provider: ChannelVideoProvider | None = None,
     __: VideoMetadataProvider | None = None,
+    ___: TranscriptProvider | None = None,
     repository: ChannelRepository | None = None,
 ) -> int:
     service = ChannelCrawlService(
@@ -239,6 +265,7 @@ def enrich(
     _: ChannelDiscoveryProvider | None = None,
     __: ChannelVideoProvider | None = None,
     provider: VideoMetadataProvider | None = None,
+    ___: TranscriptProvider | None = None,
     repository: ChannelRepository | None = None,
 ) -> int:
     result = _metadata_service(provider, repository).enrich(args.video_id)
@@ -254,6 +281,7 @@ def enrich_channel(
     _: ChannelDiscoveryProvider | None = None,
     __: ChannelVideoProvider | None = None,
     provider: VideoMetadataProvider | None = None,
+    ___: TranscriptProvider | None = None,
     repository: ChannelRepository | None = None,
 ) -> int:
     try:
@@ -272,10 +300,88 @@ def enrich_pending(
     _: ChannelDiscoveryProvider | None = None,
     __: ChannelVideoProvider | None = None,
     provider: VideoMetadataProvider | None = None,
+    ___: TranscriptProvider | None = None,
     repository: ChannelRepository | None = None,
 ) -> int:
     report = _metadata_service(provider, repository).enrich_pending(args.limit)
     _print_enrichment_batch(report)
+    return 1 if report.failed else 0
+
+
+def _transcript_service(
+    provider: TranscriptProvider | None,
+    repository: ChannelRepository | None,
+) -> TranscriptService:
+    return TranscriptService(
+        provider or YtDlpTranscriptProvider(), _transcript_repository(repository)
+    )
+
+
+def _print_transcript_batch(report: TranscriptBatchReport) -> None:
+    print(f"Attempted: {report.attempted}")
+    print(f"Succeeded: {report.succeeded}")
+    print(f"Failed: {report.failed}")
+    for result in report.results:
+        if not result.success:
+            print(f"  {result.video_id}: {result.error}")
+
+
+def transcript(
+    args: argparse.Namespace,
+    _: ChannelDiscoveryProvider | None = None,
+    __: ChannelVideoProvider | None = None,
+    ___: VideoMetadataProvider | None = None,
+    provider: TranscriptProvider | None = None,
+    repository: ChannelRepository | None = None,
+) -> int:
+    result = _transcript_service(provider, repository).transcript(
+        args.video_id, args.lang, args.force
+    )
+    print(f"Video: {result.video_id}")
+    if not result.success:
+        print(f"Transcript: failed")
+        print(f"Error: {result.error}")
+        return 1
+    item = result.transcript
+    print(f"Transcript: {'cached' if result.cached else 'stored'}")
+    print(f"Language: {item.language}")
+    print(f"Source: {item.source}")
+    print(f"Segments: {len(item.segments)}")
+    print(f"Text length: {len(item.text)}")
+    return 0
+
+
+def transcript_channel(
+    args: argparse.Namespace,
+    _: ChannelDiscoveryProvider | None = None,
+    __: ChannelVideoProvider | None = None,
+    ___: VideoMetadataProvider | None = None,
+    provider: TranscriptProvider | None = None,
+    repository: ChannelRepository | None = None,
+) -> int:
+    try:
+        report = _transcript_service(provider, repository).transcript_channel(
+            _channel_id(args.channel), args.limit, args.lang
+        )
+    except ValueError as error:
+        print(f"Transcript failed: {error}", file=sys.stderr)
+        return 1
+    _print_transcript_batch(report)
+    return 1 if report.failed else 0
+
+
+def transcript_pending(
+    args: argparse.Namespace,
+    _: ChannelDiscoveryProvider | None = None,
+    __: ChannelVideoProvider | None = None,
+    ___: VideoMetadataProvider | None = None,
+    provider: TranscriptProvider | None = None,
+    repository: ChannelRepository | None = None,
+) -> int:
+    report = _transcript_service(provider, repository).transcript_pending(
+        args.limit, args.lang
+    )
+    _print_transcript_batch(report)
     return 1 if report.failed else 0
 
 
@@ -285,7 +391,8 @@ def placeholder(message: str):
         __: ChannelDiscoveryProvider | None = None,
         ___: ChannelVideoProvider | None = None,
         ____: VideoMetadataProvider | None = None,
-        _____: ChannelRepository | None = None,
+        _____: TranscriptProvider | None = None,
+        ______: ChannelRepository | None = None,
     ) -> int:
         print(f"Chua trien khai: {message}")
         return 0
@@ -302,7 +409,7 @@ def positive_int(value: str) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="crawl-yt", description="YouTube Intelligence Engine - Phase 1C"
+        prog="crawl-yt", description="YouTube Intelligence Engine - Phase 1D"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -346,6 +453,33 @@ def build_parser() -> argparse.ArgumentParser:
     enrich_pending_parser.add_argument("--limit", type=positive_int, required=True)
     enrich_pending_parser.set_defaults(handler=enrich_pending)
 
+    transcript_parser = subparsers.add_parser(
+        "transcript", help="Lay subtitle cua mot video"
+    )
+    transcript_parser.add_argument("video_id")
+    transcript_parser.add_argument("--lang")
+    transcript_parser.add_argument("--force", action="store_true")
+    transcript_parser.set_defaults(handler=transcript)
+
+    transcript_channel_parser = subparsers.add_parser(
+        "transcript-channel", help="Lay subtitle video cua mot kenh"
+    )
+    transcript_channel_parser.add_argument("channel")
+    transcript_channel_parser.add_argument(
+        "--limit", type=positive_int, required=True
+    )
+    transcript_channel_parser.add_argument("--lang")
+    transcript_channel_parser.set_defaults(handler=transcript_channel)
+
+    transcript_pending_parser = subparsers.add_parser(
+        "transcript-pending", help="Lay subtitle video dang cho"
+    )
+    transcript_pending_parser.add_argument(
+        "--limit", type=positive_int, required=True
+    )
+    transcript_pending_parser.add_argument("--lang")
+    transcript_pending_parser.set_defaults(handler=transcript_pending)
+
     stats_parser = subparsers.add_parser("stats", help="Hien thi thong ke")
     stats_parser.set_defaults(handler=stats)
     return parser
@@ -357,11 +491,17 @@ def main(
     discovery_provider: ChannelDiscoveryProvider | None = None,
     video_provider: ChannelVideoProvider | None = None,
     metadata_provider: VideoMetadataProvider | None = None,
+    transcript_provider: TranscriptProvider | None = None,
     repository: ChannelRepository | None = None,
 ) -> int:
     args = build_parser().parse_args(argv)
     return args.handler(
-        args, discovery_provider, video_provider, metadata_provider, repository
+        args,
+        discovery_provider,
+        video_provider,
+        metadata_provider,
+        transcript_provider,
+        repository,
     )
 
 

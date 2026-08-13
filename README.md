@@ -1,8 +1,8 @@
 # crawl-yt
 
-Nen tang Phase 1C cho YouTube Intelligence Engine. Du an tim channel, liet ke
-video va bo sung metadata co chon loc bang yt-dlp. Khong tai video/audio,
-transcript hay chay phan tich.
+Nen tang Phase 1D cho YouTube Intelligence Engine. Du an tim channel, liet ke
+video, bo sung metadata va luu YouTube captions theo timestamp. Khong tai
+video/audio, khong Whisper va chua chay phan tich.
 
 ## Cai dat tren Windows
 
@@ -14,7 +14,7 @@ python -m pip install -e .
 
 Project hien da co `.venv` cuc bo voi dependency duy nhat la `yt-dlp`.
 
-## Lenh Phase 1C
+## Lenh Phase 1D
 
 ```powershell
 python main.py doctor
@@ -27,6 +27,11 @@ python main.py crawl-all --max-channels 3 --limit-per-channel 10
 python main.py enrich VIDEO_ID
 python main.py enrich-channel UCxxxxxxxxxxxx --limit 20
 python main.py enrich-pending --limit 50
+python main.py transcript VIDEO_ID
+python main.py transcript VIDEO_ID --lang en
+python main.py transcript VIDEO_ID --lang en --force
+python main.py transcript-channel UCxxxxxxxxxxxx --limit 20 --lang en
+python main.py transcript-pending --limit 50 --lang en
 python main.py stats
 ```
 
@@ -41,6 +46,12 @@ Enumeration la thao tac nhe: yt-dlp doc flat upload list, khong fetch full tung
 video. Enrichment nang hon: moi video tao mot full metadata request nhung van
 luon `download=False`. `enrich-channel` va `enrich-pending` bat buoc co
 `--limit`; batch chay tuan tu va tiep tuc neu mot video loi.
+
+Transcript mac dinh uu tien ngon ngu `en`, `en-US`, `en-GB`. Manual caption
+duoc uu tien hon auto-generated caption; khong dung subtitle da dich. Lenh don
+dung transcript da luu neu phu hop, con `--force` se fetch va upsert lai.
+`transcript-channel` va `transcript-pending` bat buoc co `--limit`, chay tuan tu
+va tiep tuc neu mot video khong co subtitle. Chua co Whisper fallback.
 
 Database mac dinh la `data/crawl_yt.db`. Channel metadata canonical duoc luu
 trong `channels`; moi quan he channel/keyword/source duoc luu rieng trong
@@ -73,6 +84,10 @@ Video enumeration thuong co `video_id`, title va URL. Description, publish time,
 duration va cac count chi duoc luu neu flat yt-dlp result cung cap.
 Selective enrichment co the bo sung description, publish time, duration, view,
 like/comment count, thumbnail, availability, tags, categories va language.
+
+Transcript luu ca full text va danh sach segment co `start`, `end`, `text`.
+Subtitle markup va whitespace duoc lam sach; rolling captions chi duoc dedup
+bao thu khi cac cue overlap.
 
 ## Cac lenh van la placeholder
 
