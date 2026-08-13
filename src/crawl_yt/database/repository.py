@@ -16,9 +16,12 @@ from .models import (
     ChannelDiscovery,
     DiscoveryQuery,
     DiscoveryRun,
+    OperationalBudget,
     Transcript,
     TranscriptAttempt,
     Video,
+    WorkItem,
+    WorkPlan,
 )
 
 
@@ -221,6 +224,45 @@ class ChannelRepository:
                     ON discovery_queries(depth);
                 CREATE INDEX IF NOT EXISTS idx_discovery_queries_status
                     ON discovery_queries(status);
+                CREATE TABLE IF NOT EXISTS work_plans (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (
+                        status IN ('planned', 'running', 'completed', 'partial', 'failed')
+                    ),
+                    budget_json TEXT NOT NULL,
+                    summary_json TEXT NOT NULL,
+                    completed_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS work_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    plan_id INTEGER NOT NULL,
+                    item_type TEXT NOT NULL CHECK (
+                        item_type IN ('crawl_channel', 'enrich_video',
+                                      'transcript_video', 'discovery_expand')
+                    ),
+                    target_id TEXT,
+                    priority REAL NOT NULL,
+                    status TEXT NOT NULL CHECK (
+                        status IN ('pending', 'running', 'completed', 'failed', 'skipped')
+                    ),
+                    reason_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    error_message TEXT,
+                    FOREIGN KEY (plan_id) REFERENCES work_plans(id)
+                        ON DELETE CASCADE,
+                    UNIQUE (plan_id, item_type, target_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_work_items_plan_id
+                    ON work_items(plan_id);
+                CREATE INDEX IF NOT EXISTS idx_work_items_item_type
+                    ON work_items(item_type);
+                CREATE INDEX IF NOT EXISTS idx_work_items_status
+                    ON work_items(status);
+                CREATE INDEX IF NOT EXISTS idx_work_items_priority
+                    ON work_items(priority);
                 """
             )
             video_columns = {
@@ -433,6 +475,272 @@ class ChannelRepository:
 
 
 class VideoRepository(ChannelRepository):
+    def create_work_plan(self, plan: WorkPlan, items: list[WorkItem]) -> WorkPlan:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO work_plans (
+                    created_at, status, budget_json, summary_json, completed_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    self._timestamp(plan.created_at),
+                    plan.status,
+                    json.dumps(
+                        {
+                            "max_channel_crawls": plan.budget.max_channel_crawls,
+                            "max_video_enrichments": plan.budget.max_video_enrichments,
+                            "max_transcripts": plan.budget.max_transcripts,
+                            "max_discovery_queries": plan.budget.max_discovery_queries,
+                        }
+                    ),
+                    json.dumps(plan.summary),
+                    self._timestamp(plan.completed_at),
+                ),
+            )
+            plan.id = int(cursor.lastrowid)
+            connection.executemany(
+                """
+                INSERT INTO work_items (
+                    plan_id, item_type, target_id, priority, status,
+                    reason_json, created_at, started_at, completed_at, error_message
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        plan.id,
+                        item.item_type,
+                        item.target_id,
+                        item.priority,
+                        item.status,
+                        json.dumps(item.reasons, ensure_ascii=False),
+                        self._timestamp(item.created_at),
+                        self._timestamp(item.started_at),
+                        self._timestamp(item.completed_at),
+                        item.error_message,
+                    )
+                    for item in items
+                ],
+            )
+        return plan
+
+    def get_work_plan(self, plan_id: int) -> WorkPlan | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM work_plans WHERE id = ?", (plan_id,)
+            ).fetchone()
+        return self._work_plan(row) if row else None
+
+    def list_work_plans(self, limit: int) -> list[WorkPlan]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM work_plans ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [self._work_plan(row) for row in rows]
+
+    def list_work_items(
+        self,
+        plan_id: int,
+        statuses: tuple[str, ...] | None = None,
+        limit: int | None = None,
+    ) -> list[WorkItem]:
+        sql = "SELECT * FROM work_items WHERE plan_id = ?"
+        parameters: list[object] = [plan_id]
+        if statuses:
+            sql += f" AND status IN ({','.join('?' for _ in statuses)})"
+            parameters.extend(statuses)
+        sql += " ORDER BY priority DESC, item_type, target_id, id"
+        if limit is not None:
+            sql += " LIMIT ?"
+            parameters.append(limit)
+        with self._connect() as connection:
+            rows = connection.execute(sql, parameters).fetchall()
+        return [self._work_item(row) for row in rows]
+
+    def mark_work_item_running(
+        self, item_id: int, now: datetime | None = None
+    ) -> None:
+        timestamp = self._timestamp(now or datetime.now(timezone.utc))
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE work_items SET status = 'running', started_at = ?,
+                    completed_at = NULL, error_message = NULL WHERE id = ?
+                """,
+                (timestamp, item_id),
+            )
+
+    def finish_work_item(
+        self,
+        item_id: int,
+        status: str,
+        error_message: str | None = None,
+        now: datetime | None = None,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE work_items SET status = ?, completed_at = ?, error_message = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    self._timestamp(now or datetime.now(timezone.utc)),
+                    error_message,
+                    item_id,
+                ),
+            )
+
+    def update_work_plan_status(
+        self, plan_id: int, status: str, now: datetime | None = None
+    ) -> None:
+        terminal = status in {"completed", "failed"}
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE work_plans SET status = ?, completed_at = ? WHERE id = ?",
+                (
+                    status,
+                    self._timestamp(now or datetime.now(timezone.utc)) if terminal else None,
+                    plan_id,
+                ),
+            )
+
+    def refresh_work_plan_status(self, plan_id: int) -> str:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT status, COUNT(*) FROM work_items WHERE plan_id = ? GROUP BY status",
+                (plan_id,),
+            ).fetchall()
+        counts = {str(row[0]): int(row[1]) for row in rows}
+        if not counts or set(counts) <= {"completed", "skipped"}:
+            status = "completed"
+        else:
+            status = "partial"
+        self.update_work_plan_status(plan_id, status)
+        return status
+
+    def work_plan_status_counts(self) -> dict[str, int]:
+        counts = {key: 0 for key in ("planned", "running", "partial", "completed", "failed")}
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT status, COUNT(*) FROM work_plans GROUP BY status"
+            ).fetchall()
+        for status, count in rows:
+            counts[str(status)] = int(count)
+        return counts
+
+    def pending_work_item_counts(self) -> dict[str, int]:
+        counts = {key: 0 for key in ("crawl_channel", "enrich_video", "transcript_video", "discovery_expand")}
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT item_type, COUNT(*) FROM work_items
+                WHERE status = 'pending' GROUP BY item_type
+                """
+            ).fetchall()
+        for item_type, count in rows:
+            counts[str(item_type)] = int(count)
+        return counts
+
+    def list_crawl_work_candidates(
+        self, limit: int, now: datetime
+    ) -> list[dict[str, object]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT c.channel_id, c.title, s.next_crawl_at, s.last_success_at,
+                       s.consecutive_failures, cs.score, cs.tier
+                FROM channel_crawl_state AS s
+                JOIN channels AS c ON c.channel_id = s.channel_id
+                LEFT JOIN channel_scores AS cs ON cs.channel_id = c.channel_id
+                WHERE s.next_crawl_at <= ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM work_items wi JOIN work_plans wp ON wp.id = wi.plan_id
+                    WHERE wi.item_type = 'crawl_channel' AND wi.target_id = c.channel_id
+                      AND wi.status = 'running'
+                      AND wp.status IN ('planned', 'running', 'partial')
+                  )
+                ORDER BY (
+                    CASE COALESCE(cs.tier, 'unscored')
+                        WHEN 'high' THEN 300 WHEN 'medium' THEN 200
+                        WHEN 'unscored' THEN 150 ELSE 100 END
+                    + MIN(50.0, MAX(0.0, julianday(?) - julianday(s.next_crawl_at)))
+                    - s.consecutive_failures * 20
+                ) DESC, c.channel_id
+                LIMIT ?
+                """,
+                (self._timestamp(now), self._timestamp(now), limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_video_work_candidates(
+        self, item_type: str, limit: int, now: datetime
+    ) -> list[dict[str, object]]:
+        if item_type not in {"enrich_video", "transcript_video"}:
+            raise ValueError("unsupported video work type")
+        pending = (
+            "v.metadata_enriched_at IS NULL"
+            if item_type == "enrich_video"
+            else "NOT EXISTS (SELECT 1 FROM transcripts t WHERE t.video_id = v.video_id)"
+        )
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT v.video_id, v.channel_id, v.published_at,
+                       v.metadata_enriched_at, cs.score, cs.tier
+                FROM videos AS v
+                LEFT JOIN channel_scores AS cs ON cs.channel_id = v.channel_id
+                WHERE {pending}
+                  AND NOT EXISTS (
+                    SELECT 1 FROM work_items wi JOIN work_plans wp ON wp.id = wi.plan_id
+                    WHERE wi.item_type = ? AND wi.target_id = v.video_id
+                      AND wi.status = 'running'
+                      AND wp.status IN ('planned', 'running', 'partial')
+                  )
+                ORDER BY (
+                    COALESCE(cs.score, 0) * 2
+                    + CASE WHEN v.published_at IS NULL THEN 0
+                        ELSE MAX(0.0, 100.0 -
+                            (julianday(?) - julianday(v.published_at)) / 3.0)
+                      END
+                    + CASE WHEN ? = 'transcript_video'
+                              AND v.metadata_enriched_at IS NOT NULL
+                           THEN 20 ELSE 0 END
+                ) DESC, v.video_id
+                LIMIT ?
+                """,
+                (item_type, self._timestamp(now), item_type, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def _work_plan(row: sqlite3.Row) -> WorkPlan:
+        budget = json.loads(row["budget_json"])
+        return WorkPlan(
+            id=int(row["id"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            status=row["status"],
+            budget=OperationalBudget(**budget),
+            summary=json.loads(row["summary_json"]),
+            completed_at=(datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None),
+        )
+
+    @staticmethod
+    def _work_item(row: sqlite3.Row) -> WorkItem:
+        return WorkItem(
+            id=int(row["id"]),
+            plan_id=int(row["plan_id"]),
+            item_type=row["item_type"],
+            target_id=row["target_id"],
+            priority=float(row["priority"]),
+            status=row["status"],
+            reasons=json.loads(row["reason_json"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            started_at=(datetime.fromisoformat(row["started_at"]) if row["started_at"] else None),
+            completed_at=(datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None),
+            error_message=row["error_message"],
+        )
+
     def create_discovery_run(self, run: DiscoveryRun) -> DiscoveryRun:
         with self._connect() as connection:
             cursor = connection.execute(

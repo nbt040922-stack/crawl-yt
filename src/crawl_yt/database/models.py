@@ -86,6 +86,39 @@ class DiscoveryQuery:
     executed_at: datetime | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class OperationalBudget:
+    max_channel_crawls: int
+    max_video_enrichments: int
+    max_transcripts: int
+    max_discovery_queries: int = 0
+
+
+@dataclass(slots=True)
+class WorkPlan:
+    id: int | None
+    created_at: datetime
+    status: str
+    budget: OperationalBudget
+    summary: dict[str, int]
+    completed_at: datetime | None = None
+
+
+@dataclass(slots=True)
+class WorkItem:
+    id: int | None
+    plan_id: int
+    item_type: str
+    target_id: str | None
+    priority: float
+    status: str
+    reasons: dict[str, Any]
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    error_message: str | None = None
+
+
 @dataclass(slots=True)
 class Video:
     video_id: str

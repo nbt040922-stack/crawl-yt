@@ -104,6 +104,17 @@ class CliTests(unittest.TestCase):
         self.assertEqual((args.max_depth, args.channel_budget, args.query_budget), (2, 500, 30))
         self.assertTrue(args.dry_run)
 
+    def test_work_plan_budgets_and_execution_limit_are_required(self) -> None:
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            build_parser().parse_args(["plan-work"])
+        args = build_parser().parse_args([
+            "plan-work", "--max-crawls", "3", "--max-enrichments", "5",
+            "--max-transcripts", "5",
+        ])
+        self.assertEqual((args.max_crawls, args.max_enrichments, args.max_transcripts), (3, 5, 5))
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            build_parser().parse_args(["execute-plan", "1"])
+
     def test_dry_run_does_not_persist(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = ChannelRepository(Path(directory) / "test.db")

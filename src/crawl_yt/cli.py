@@ -28,10 +28,12 @@ from .collectors.ytdlp_channel_video import YtDlpChannelVideoProvider
 from .collectors.ytdlp_video_metadata import YtDlpVideoMetadataProvider
 from .config import Config
 from .database.repository import ChannelRepository, TranscriptRepository, VideoRepository
+from .database.models import OperationalBudget
 from .discovery.channel_discovery import ChannelDiscoveryProvider, DiscoveryService
 from .discovery.channel_scoring import ChannelScoringService, CrawlPriorityPolicy
 from .discovery.expansion import DiscoveryExpansionService
 from .discovery.ytdlp_provider import YtDlpDiscoveryProvider
+from .operations.planner import OperationalPlanner, WorkPlanExecutor
 from .transcripts.opencli_provider import OpenCliTranscriptProvider
 from .transcripts.provider import (
     TranscriptBatchReport,
@@ -276,6 +278,15 @@ def stats(
     print("Channel scores:")
     for tier in ("high", "medium", "low", "unscored"):
         print(f"  {tier}: {score_counts[tier]}")
+    plan_counts = database.work_plan_status_counts()
+    print("Work plans:")
+    for status in ("planned", "running", "partial", "completed", "failed"):
+        print(f"  {status}: {plan_counts[status]}")
+    item_counts = database.pending_work_item_counts()
+    print("Pending work items:")
+    print(f"  crawl: {item_counts['crawl_channel']}")
+    print(f"  enrichment: {item_counts['enrich_video']}")
+    print(f"  transcript: {item_counts['transcript_video']}")
     print(f"Metadata enriched: {database.count_enriched_videos()}")
     print(f"Metadata pending: {database.count_videos_needing_enrichment()}")
     print(f"Transcripts: {database.count_transcripts()}")
@@ -466,6 +477,118 @@ def top_channels(
     return 0
 
 
+def plan_work(
+    args: argparse.Namespace,
+    _: ChannelDiscoveryProvider | None = None,
+    __: ChannelVideoProvider | None = None,
+    ___: VideoMetadataProvider | None = None,
+    ____: TranscriptProvider | None = None,
+    repository: ChannelRepository | None = None,
+) -> int:
+    budget = OperationalBudget(
+        args.max_crawls,
+        args.max_enrichments,
+        args.max_transcripts,
+        args.discovery_query_budget,
+    )
+    plan = OperationalPlanner(_video_repository(repository)).plan(budget, args.seed)
+    print(f"Plan ID: {plan.id}")
+    print(f"Crawl channels: {plan.summary['crawl_channel']}")
+    print(f"Metadata enrichments: {plan.summary['enrich_video']}")
+    print(f"Transcripts: {plan.summary['transcript_video']}")
+    print(f"Discovery expansions: {plan.summary['discovery_expand']}")
+    return 0
+
+
+def _print_work_plan(database: VideoRepository, plan) -> None:
+    print(f"Plan ID: {plan.id}")
+    print(f"Status: {plan.status}")
+    print(
+        "Budgets: "
+        f"crawl={plan.budget.max_channel_crawls}, "
+        f"enrichment={plan.budget.max_video_enrichments}, "
+        f"transcript={plan.budget.max_transcripts}, "
+        f"discovery={plan.budget.max_discovery_queries}"
+    )
+    print("Counts:")
+    for item_type, count in plan.summary.items():
+        print(f"  {item_type}: {count}")
+    print("Top items:")
+    for item in database.list_work_items(plan.id, limit=10):
+        print(
+            f"  {item.priority:7.2f} {item.status:<9} "
+            f"{item.item_type:<18} {item.target_id}"
+        )
+
+
+def work_plan(
+    args: argparse.Namespace,
+    _: ChannelDiscoveryProvider | None = None,
+    __: ChannelVideoProvider | None = None,
+    ___: VideoMetadataProvider | None = None,
+    ____: TranscriptProvider | None = None,
+    repository: ChannelRepository | None = None,
+) -> int:
+    database = _video_repository(repository)
+    plan = database.get_work_plan(args.plan_id)
+    if plan is None:
+        print(f"Work plan {args.plan_id} not found", file=sys.stderr)
+        return 1
+    _print_work_plan(database, plan)
+    return 0
+
+
+def work_plans(
+    args: argparse.Namespace,
+    _: ChannelDiscoveryProvider | None = None,
+    __: ChannelVideoProvider | None = None,
+    ___: VideoMetadataProvider | None = None,
+    ____: TranscriptProvider | None = None,
+    repository: ChannelRepository | None = None,
+) -> int:
+    print("ID  Status      Crawl  Enrich  Transcript  Discovery")
+    for plan in _video_repository(repository).list_work_plans(args.limit):
+        print(
+            f"{plan.id:<3} {plan.status:<11} {plan.summary['crawl_channel']:>5} "
+            f"{plan.summary['enrich_video']:>7} {plan.summary['transcript_video']:>11} "
+            f"{plan.summary['discovery_expand']:>10}"
+        )
+    return 0
+
+
+def execute_plan(
+    args: argparse.Namespace,
+    _: ChannelDiscoveryProvider | None = None,
+    video_provider: ChannelVideoProvider | None = None,
+    metadata_provider: VideoMetadataProvider | None = None,
+    transcript_provider: TranscriptProvider | None = None,
+    repository: ChannelRepository | None = None,
+) -> int:
+    database = _transcript_repository(repository)
+    executor = WorkPlanExecutor(
+        database,
+        ChannelCrawlService(
+            video_provider or YtDlpChannelVideoProvider(), database
+        ),
+        VideoMetadataService(
+            metadata_provider or YtDlpVideoMetadataProvider(), database
+        ),
+        _transcript_service(transcript_provider, database),
+    )
+    try:
+        report = executor.execute(args.plan_id, args.max_items, args.retry_failed)
+    except ValueError as error:
+        print(f"Execution failed: {error}", file=sys.stderr)
+        return 1
+    print(f"Plan ID: {report.plan_id}")
+    print(f"Attempted: {report.attempted}")
+    print(f"Completed: {report.completed}")
+    print(f"Failed: {report.failed}")
+    print(f"Skipped: {report.skipped}")
+    print(f"Plan status: {report.status}")
+    return 1 if report.failed else 0
+
+
 def _metadata_service(
     provider: VideoMetadataProvider | None,
     repository: ChannelRepository | None,
@@ -650,6 +773,13 @@ def positive_int(value: str) -> int:
     return number
 
 
+def nonnegative_int(value: str) -> int:
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return number
+
+
 def _add_fallback_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--fallback", action="store_true", help="Cho phep fallback khong audio"
@@ -738,6 +868,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     top_channels_parser.add_argument("--limit", type=positive_int, required=True)
     top_channels_parser.set_defaults(handler=top_channels)
+
+    plan_parser = subparsers.add_parser("plan-work", help="Lap ke hoach cong viec")
+    plan_parser.add_argument("--max-crawls", type=nonnegative_int, required=True)
+    plan_parser.add_argument("--max-enrichments", type=nonnegative_int, required=True)
+    plan_parser.add_argument("--max-transcripts", type=nonnegative_int, required=True)
+    plan_parser.add_argument("--seed", action="append", default=[])
+    plan_parser.add_argument("--discovery-query-budget", type=nonnegative_int, default=0)
+    plan_parser.set_defaults(handler=plan_work)
+
+    work_plan_parser = subparsers.add_parser("work-plan", help="Chi tiet work plan")
+    work_plan_parser.add_argument("plan_id", type=positive_int)
+    work_plan_parser.set_defaults(handler=work_plan)
+
+    work_plans_parser = subparsers.add_parser("work-plans", help="Liet ke work plan")
+    work_plans_parser.add_argument("--limit", type=positive_int, required=True)
+    work_plans_parser.set_defaults(handler=work_plans)
+
+    execute_parser = subparsers.add_parser("execute-plan", help="Chay work plan tuan tu")
+    execute_parser.add_argument("plan_id", type=positive_int)
+    execute_parser.add_argument("--max-items", type=positive_int, required=True)
+    execute_parser.add_argument("--retry-failed", action="store_true")
+    execute_parser.set_defaults(handler=execute_plan)
 
     enrich_parser = subparsers.add_parser("enrich", help="Bo sung metadata video")
     enrich_parser.add_argument("video_id")

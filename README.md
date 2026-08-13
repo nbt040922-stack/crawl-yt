@@ -1,6 +1,6 @@
 # crawl-yt
 
-Nen tang Phase 2C cho YouTube Intelligence Engine. Du an tim channel, liet ke
+Nen tang Phase 2D cho YouTube Intelligence Engine. Du an tim channel, liet ke
 video, bo sung metadata va luu transcript theo timestamp. YouTube captions la
 duong mac dinh re; audio va ASR cuc bo luon la fallback dat tien, phai bat ro.
 
@@ -22,7 +22,7 @@ python -m pip install -e ".[asr]"
 Lenh tren cai `faster-whisper` vao virtualenv cua project. Khong can thay doi
 CUDA driver/toolkit he thong.
 
-## Lenh Phase 2C
+## Lenh Phase 2D
 
 ```powershell
 python main.py doctor
@@ -33,6 +33,12 @@ python main.py expand "retirement" --max-depth 2 --channel-budget 500 --query-bu
 python main.py expand "retirement" --max-depth 2 --channel-budget 500 --query-budget 30 --dry-run
 python main.py discovery-runs --limit 20
 python main.py discovery-run 1
+python main.py plan-work --max-crawls 50 --max-enrichments 100 --max-transcripts 100
+python main.py plan-work --max-crawls 10 --max-enrichments 20 --max-transcripts 20 --seed retirement --discovery-query-budget 1
+python main.py work-plans --limit 20
+python main.py work-plan 1
+python main.py execute-plan 1 --max-items 20
+python main.py execute-plan 1 --max-items 20 --retry-failed
 python main.py crawl UCxxxxxxxxxxxx --limit 20
 python main.py crawl UCxxxxxxxxxxxx
 python main.py crawl UCxxxxxxxxxxxx --full
@@ -103,6 +109,22 @@ keyword, channel title, recent video title va tag/category da co trong SQLite;
 stopword/junk va phrase ngoai 2-6 tu bi loai. `--dry-run` chi lap ke hoach tu du
 lieu local, khong goi YouTube va khong ghi run/channel. `discovery-runs` hien
 lich su ngan gon; `discovery-run ID` hien provenance query, depth va ket qua.
+
+Operational planner tach lap ke hoach khoi thuc thi. `plan-work` chi doc trang
+thai SQLite, xep hang deterministic va ghi snapshot plan; lenh nay khong goi
+YouTube. Ba budget crawl/enrichment/transcript bat buoc khai bao va co the bang
+0. Discovery chi duoc lap ke hoach khi co `--seed`, bi gioi han boi
+`--discovery-query-budget` va khong tu phat minh seed.
+
+`execute-plan` chay tuan tu, bat buoc `--max-items`, tiep tuc khi mot item loi va
+chi dung caption re cho transcript. Completed item khong chay lai; failed item
+chi duoc thu lai khi co `--retry-failed`. Phase 2D khong thuc thi
+`discovery_expand` trong saved plan va khong bao gio tu bat audio ASR.
+
+Priority crawl = tier base (high 300, medium 200, unscored 150, low 100) + so
+ngay overdue toi da 50 - 20 moi failure lien tiep. Video priority = channel
+score x2 + recency 0-100; transcript enriched duoc cong 20. Moi item luu reasons
+JSON de co the giai thich tai sao duoc chon.
 
 Enumeration la thao tac nhe: yt-dlp doc flat upload list, khong fetch full tung
 video. Enrichment nang hon: moi video tao mot full metadata request nhung van
