@@ -32,6 +32,17 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.limit, 100)
         self.assertTrue(args.dry_run)
 
+    def test_crawl_argument_parsing(self) -> None:
+        args = build_parser().parse_args(["crawl", "UC123", "--limit", "20"])
+        self.assertEqual(args.channel, "UC123")
+        self.assertEqual(args.limit, 20)
+
+        all_args = build_parser().parse_args(
+            ["crawl-all", "--max-channels", "3", "--limit-per-channel", "10"]
+        )
+        self.assertEqual(all_args.max_channels, 3)
+        self.assertEqual(all_args.limit_per_channel, 10)
+
     def test_dry_run_does_not_persist(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = ChannelRepository(Path(directory) / "test.db")

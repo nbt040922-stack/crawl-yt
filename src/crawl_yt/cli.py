@@ -1,4 +1,4 @@
-"""Command-line interface for channel discovery Phase 1A."""
+"""Command-line interface for discovery and video enumeration."""
 
 from __future__ import annotations
 
@@ -12,8 +12,15 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from .collectors.channel_collector import (
+    ChannelCrawlService,
+    ChannelVideoProvider,
+    CrawlReport,
+    UnknownChannelError,
+)
+from .collectors.ytdlp_channel_video import YtDlpChannelVideoProvider
 from .config import Config
-from .database.repository import ChannelRepository
+from .database.repository import ChannelRepository, VideoRepository
 from .discovery.channel_discovery import ChannelDiscoveryProvider, DiscoveryService
 from .discovery.ytdlp_provider import YtDlpDiscoveryProvider
 
@@ -33,7 +40,7 @@ def _database_path() -> Path:
     url = Config.from_env().database_url
     prefix = "sqlite:///"
     if not url.startswith(prefix):
-        raise ValueError("Phase 1A only supports sqlite:/// DATABASE_URL values")
+        raise ValueError("Only sqlite:/// DATABASE_URL values are supported")
     return Path(url.removeprefix(prefix))
 
 
@@ -41,9 +48,18 @@ def _repository() -> ChannelRepository:
     return ChannelRepository(_database_path())
 
 
+def _video_repository(
+    repository: ChannelRepository | None = None,
+) -> VideoRepository:
+    if isinstance(repository, VideoRepository):
+        return repository
+    return VideoRepository(repository.database_path if repository else _database_path())
+
+
 def doctor(
     _: argparse.Namespace,
     __: ChannelDiscoveryProvider | None = None,
+    ___: ChannelVideoProvider | None = None,
     repository: ChannelRepository | None = None,
 ) -> int:
     try:
@@ -77,6 +93,7 @@ def doctor(
 def discover(
     args: argparse.Namespace,
     provider: ChannelDiscoveryProvider | None = None,
+    _: ChannelVideoProvider | None = None,
     repository: ChannelRepository | None = None,
 ) -> int:
     service = DiscoveryService(
@@ -105,13 +122,14 @@ def discover(
 def stats(
     _: argparse.Namespace,
     __: ChannelDiscoveryProvider | None = None,
+    ___: ChannelVideoProvider | None = None,
     repository: ChannelRepository | None = None,
 ) -> int:
-    database = repository or _repository()
+    database = _video_repository(repository)
     print(f"Database: {database.database_path}")
     print()
     print(f"Channels: {database.count_channels()}")
-    print("Videos: 0")
+    print(f"Videos: {database.count_videos()}")
     print("Transcripts: 0")
     print(f"Discovery relationships: {database.count_discovery_relationships()}")
     keyword_counts = database.discovery_keyword_counts()
@@ -123,11 +141,74 @@ def stats(
     return 0
 
 
+def _channel_id(value: str) -> str:
+    if value.startswith("UC"):
+        return value
+    marker = "/channel/"
+    if marker in value:
+        return value.split(marker, 1)[1].split("/", 1)[0]
+    return value
+
+
+def _print_crawl(report: CrawlReport) -> None:
+    print(f"Channel: {report.channel_title} ({report.channel_id})")
+    print(f"Enumerated entries: {report.enumerated_entries}")
+    print(f"Unique videos: {report.unique_videos}")
+    print(f"New videos: {report.new_videos}")
+    print(f"Existing videos: {report.existing_videos}")
+    print(f"Skipped: {report.skipped_entries}")
+
+
+def crawl(
+    args: argparse.Namespace,
+    _: ChannelDiscoveryProvider | None = None,
+    provider: ChannelVideoProvider | None = None,
+    repository: ChannelRepository | None = None,
+) -> int:
+    service = ChannelCrawlService(
+        provider or YtDlpChannelVideoProvider(), _video_repository(repository)
+    )
+    try:
+        report = service.crawl(_channel_id(args.channel), args.limit)
+    except UnknownChannelError as error:
+        print(f"Crawl failed: {error}", file=sys.stderr)
+        return 1
+    except Exception as error:  # yt-dlp errors vary by extractor and network state
+        print(f"Crawl failed: {error}", file=sys.stderr)
+        return 1
+    _print_crawl(report)
+    return 0
+
+
+def crawl_all(
+    args: argparse.Namespace,
+    _: ChannelDiscoveryProvider | None = None,
+    provider: ChannelVideoProvider | None = None,
+    repository: ChannelRepository | None = None,
+) -> int:
+    service = ChannelCrawlService(
+        provider or YtDlpChannelVideoProvider(), _video_repository(repository)
+    )
+    report = service.crawl_all(args.max_channels, args.limit_per_channel)
+    print(f"Channels attempted: {report.channels_attempted}")
+    print(f"Channels succeeded: {report.channels_succeeded}")
+    print(f"Enumerated entries: {report.enumerated_entries}")
+    print(f"Unique videos: {report.unique_videos}")
+    print(f"New videos: {report.new_videos}")
+    print(f"Existing videos: {report.existing_videos}")
+    print(f"Skipped: {report.skipped_entries}")
+    print(f"Failures: {len(report.failures)}")
+    for channel_id, error in report.failures:
+        print(f"  {channel_id}: {error}")
+    return 1 if report.failures else 0
+
+
 def placeholder(message: str):
     def run(
         _: argparse.Namespace,
         __: ChannelDiscoveryProvider | None = None,
-        ___: ChannelRepository | None = None,
+        ___: ChannelVideoProvider | None = None,
+        ____: ChannelRepository | None = None,
     ) -> int:
         print(f"Chua trien khai: {message}")
         return 0
@@ -144,7 +225,7 @@ def positive_int(value: str) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="crawl-yt", description="YouTube Intelligence Engine - Phase 1A"
+        prog="crawl-yt", description="YouTube Intelligence Engine - Phase 1B"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -163,10 +244,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     crawl_parser = subparsers.add_parser("crawl", help="Thu thap mot kenh")
     crawl_parser.add_argument("channel")
-    crawl_parser.set_defaults(handler=placeholder("crawl"))
+    crawl_parser.add_argument("--limit", type=positive_int)
+    crawl_parser.set_defaults(handler=crawl)
 
     crawl_all_parser = subparsers.add_parser("crawl-all", help="Thu thap moi kenh")
-    crawl_all_parser.set_defaults(handler=placeholder("crawl-all"))
+    crawl_all_parser.add_argument("--max-channels", type=positive_int)
+    crawl_all_parser.add_argument("--limit-per-channel", type=positive_int)
+    crawl_all_parser.set_defaults(handler=crawl_all)
 
     stats_parser = subparsers.add_parser("stats", help="Hien thi thong ke")
     stats_parser.set_defaults(handler=stats)
@@ -177,10 +261,11 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     discovery_provider: ChannelDiscoveryProvider | None = None,
+    video_provider: ChannelVideoProvider | None = None,
     repository: ChannelRepository | None = None,
 ) -> int:
     args = build_parser().parse_args(argv)
-    return args.handler(args, discovery_provider, repository)
+    return args.handler(args, discovery_provider, video_provider, repository)
 
 
 if __name__ == "__main__":

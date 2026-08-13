@@ -32,6 +32,7 @@ class Video:
     video_id: str
     channel_id: str
     title: str
+    first_seen_at: datetime
     description: str | None = None
     published_at: datetime | None = None
     duration_seconds: int | None = None
@@ -39,6 +40,10 @@ class Video:
     like_count: int | None = None
     comment_count: int | None = None
     thumbnail_url: str | None = None
+    webpage_url: str | None = None
+    availability: str | None = None
+    last_checked_at: datetime | None = None
+    metadata_source: str | None = None
 
 
 @dataclass(slots=True)

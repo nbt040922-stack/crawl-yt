@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .models import Channel, ChannelDiscovery
+from .models import Channel, ChannelDiscovery, Video
 
 
 class ChannelRepository:
@@ -38,8 +38,8 @@ class ChannelRepository:
                 for row in connection.execute("PRAGMA table_info(channels)").fetchall()
             }
             if columns & {"discovery_keyword", "discovery_source"}:
-                connection.executescript(
-                    "DROP TABLE IF EXISTS channel_discoveries; DROP TABLE channels;"
+                raise sqlite3.DatabaseError(
+                    "Legacy Phase 1A schema detected; migrate or reset it explicitly"
                 )
             connection.executescript(
                 """
@@ -66,6 +66,29 @@ class ChannelRepository:
                     ON channel_discoveries(keyword);
                 CREATE INDEX IF NOT EXISTS idx_channel_discoveries_channel_id
                     ON channel_discoveries(channel_id);
+                CREATE TABLE IF NOT EXISTS videos (
+                    video_id TEXT PRIMARY KEY,
+                    channel_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    published_at TEXT,
+                    duration_seconds INTEGER,
+                    view_count INTEGER,
+                    like_count INTEGER,
+                    comment_count INTEGER,
+                    thumbnail_url TEXT,
+                    webpage_url TEXT,
+                    availability TEXT,
+                    first_seen_at TEXT NOT NULL,
+                    last_checked_at TEXT,
+                    metadata_source TEXT,
+                    FOREIGN KEY (channel_id) REFERENCES channels(channel_id)
+                        ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_videos_channel_id
+                    ON videos(channel_id);
+                CREATE INDEX IF NOT EXISTS idx_videos_published_at
+                    ON videos(published_at);
                 """
             )
 
@@ -251,4 +274,146 @@ class ChannelRepository:
             keyword=row["keyword"],
             source=row["source"],
             discovered_at=datetime.fromisoformat(row["discovered_at"]),
+        )
+
+
+class VideoRepository(ChannelRepository):
+    def upsert_video(self, video: Video) -> bool:
+        """Upsert video metadata while preserving the original first_seen_at."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO videos (
+                    video_id, channel_id, title, description, published_at,
+                    duration_seconds, view_count, like_count, comment_count,
+                    thumbnail_url, webpage_url, availability, first_seen_at,
+                    last_checked_at, metadata_source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                self._video_values(video),
+            )
+            inserted = cursor.rowcount == 1
+            if not inserted:
+                connection.execute(
+                    """
+                    UPDATE videos SET
+                        channel_id = ?, title = ?,
+                        description = COALESCE(?, description),
+                        published_at = COALESCE(?, published_at),
+                        duration_seconds = COALESCE(?, duration_seconds),
+                        view_count = COALESCE(?, view_count),
+                        like_count = COALESCE(?, like_count),
+                        comment_count = COALESCE(?, comment_count),
+                        thumbnail_url = COALESCE(?, thumbnail_url),
+                        webpage_url = COALESCE(?, webpage_url),
+                        availability = COALESCE(?, availability),
+                        last_checked_at = ?, metadata_source = ?
+                    WHERE video_id = ?
+                    """,
+                    (
+                        video.channel_id,
+                        video.title,
+                        video.description,
+                        self._timestamp(video.published_at),
+                        video.duration_seconds,
+                        video.view_count,
+                        video.like_count,
+                        video.comment_count,
+                        video.thumbnail_url,
+                        video.webpage_url,
+                        video.availability,
+                        self._timestamp(video.last_checked_at),
+                        video.metadata_source,
+                        video.video_id,
+                    ),
+                )
+        return inserted
+
+    def get_video(self, video_id: str) -> Video | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM videos WHERE video_id = ?", (video_id,)
+            ).fetchone()
+        return self._video(row) if row else None
+
+    def video_exists(self, video_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM videos WHERE video_id = ?", (video_id,)
+            ).fetchone()
+        return row is not None
+
+    def count_videos(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute("SELECT COUNT(*) FROM videos").fetchone()
+        return int(row[0])
+
+    def count_videos_for_channel(self, channel_id: str) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM videos WHERE channel_id = ?", (channel_id,)
+            ).fetchone()
+        return int(row[0])
+
+    def list_videos_for_channel(
+        self, channel_id: str, limit: int | None = None
+    ) -> list[Video]:
+        sql = """
+            SELECT * FROM videos WHERE channel_id = ?
+            ORDER BY published_at IS NULL, published_at DESC, video_id
+        """
+        parameters: list[object] = [channel_id]
+        if limit is not None:
+            sql += " LIMIT ?"
+            parameters.append(limit)
+        with self._connect() as connection:
+            rows = connection.execute(sql, parameters).fetchall()
+        return [self._video(row) for row in rows]
+
+    @classmethod
+    def _video_values(cls, video: Video) -> tuple[object, ...]:
+        return (
+            video.video_id,
+            video.channel_id,
+            video.title,
+            video.description,
+            cls._timestamp(video.published_at),
+            video.duration_seconds,
+            video.view_count,
+            video.like_count,
+            video.comment_count,
+            video.thumbnail_url,
+            video.webpage_url,
+            video.availability,
+            cls._timestamp(video.first_seen_at),
+            cls._timestamp(video.last_checked_at),
+            video.metadata_source,
+        )
+
+    @staticmethod
+    def _video(row: sqlite3.Row) -> Video:
+        return Video(
+            video_id=row["video_id"],
+            channel_id=row["channel_id"],
+            title=row["title"],
+            first_seen_at=datetime.fromisoformat(row["first_seen_at"]),
+            description=row["description"],
+            published_at=(
+                datetime.fromisoformat(row["published_at"])
+                if row["published_at"]
+                else None
+            ),
+            duration_seconds=row["duration_seconds"],
+            view_count=row["view_count"],
+            like_count=row["like_count"],
+            comment_count=row["comment_count"],
+            thumbnail_url=row["thumbnail_url"],
+            webpage_url=row["webpage_url"],
+            availability=row["availability"],
+            last_checked_at=(
+                datetime.fromisoformat(row["last_checked_at"])
+                if row["last_checked_at"]
+                else None
+            ),
+            metadata_source=row["metadata_source"],
         )
