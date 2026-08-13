@@ -42,12 +42,63 @@ class VideoRepositoryTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(table, ("videos",))
 
+    def test_safe_additive_metadata_migration(self) -> None:
+        legacy_path = Path(self.temporary_directory.name) / "phase-1b.db"
+        with closing(sqlite3.connect(legacy_path)) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE channels (channel_id TEXT PRIMARY KEY, title TEXT NOT NULL);
+                CREATE TABLE videos (
+                    video_id TEXT PRIMARY KEY,
+                    channel_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    published_at TEXT,
+                    duration_seconds INTEGER,
+                    view_count INTEGER,
+                    like_count INTEGER,
+                    comment_count INTEGER,
+                    thumbnail_url TEXT,
+                    webpage_url TEXT,
+                    availability TEXT,
+                    first_seen_at TEXT NOT NULL,
+                    last_checked_at TEXT,
+                    metadata_source TEXT
+                );
+                INSERT INTO channels VALUES ('UC123', 'Example');
+                INSERT INTO videos (video_id, channel_id, title, first_seen_at)
+                    VALUES ('video-1', 'UC123', 'Original', '2026-01-01T00:00:00+00:00');
+                """
+            )
+        migrated = VideoRepository(legacy_path)
+        with closing(sqlite3.connect(legacy_path)) as connection:
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(videos)")
+            }
+        self.assertTrue(
+            {"tags_json", "categories_json", "language", "metadata_enriched_at"}
+            <= columns
+        )
+        self.assertEqual(migrated.count_videos(), 1)
+        self.assertIsNone(migrated.get_video("video-1").metadata_enriched_at)
+
     def test_video_insert_and_get(self) -> None:
         self.assertTrue(self.repository.upsert_video(self.video()))
         stored = self.repository.get_video("video-1")
         self.assertIsNotNone(stored)
         self.assertEqual(stored.title, "Original")
+        self.assertIsNone(stored.metadata_enriched_at)
         self.assertTrue(self.repository.video_exists("video-1"))
+
+    def test_pending_video_queries(self) -> None:
+        self.repository.upsert_video(self.video())
+        self.repository.upsert_video(
+            Video("video-2", "UC123", "Second", self.first_seen)
+        )
+        pending = self.repository.list_videos_needing_enrichment(limit=1)
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(self.repository.count_videos_needing_enrichment(), 2)
+        self.assertEqual(self.repository.count_enriched_videos(), 0)
 
     def test_duplicate_updates_metadata_and_preserves_first_seen(self) -> None:
         self.repository.upsert_video(self.video())

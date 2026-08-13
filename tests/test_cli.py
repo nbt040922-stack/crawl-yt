@@ -5,7 +5,7 @@ from __future__ import annotations
 import io
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from src.crawl_yt.cli import build_parser, main
@@ -42,6 +42,18 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(all_args.max_channels, 3)
         self.assertEqual(all_args.limit_per_channel, 10)
+
+    def test_enrichment_argument_parsing_and_required_limits(self) -> None:
+        single = build_parser().parse_args(["enrich", "video-1"])
+        self.assertEqual(single.video_id, "video-1")
+        channel = build_parser().parse_args(
+            ["enrich-channel", "UC123", "--limit", "5"]
+        )
+        self.assertEqual(channel.limit, 5)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            build_parser().parse_args(["enrich-channel", "UC123"])
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            build_parser().parse_args(["enrich-pending"])
 
     def test_dry_run_does_not_persist(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

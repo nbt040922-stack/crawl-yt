@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -82,6 +83,10 @@ class ChannelRepository:
                     first_seen_at TEXT NOT NULL,
                     last_checked_at TEXT,
                     metadata_source TEXT,
+                    tags_json TEXT,
+                    categories_json TEXT,
+                    language TEXT,
+                    metadata_enriched_at TEXT,
                     FOREIGN KEY (channel_id) REFERENCES channels(channel_id)
                         ON DELETE CASCADE
                 );
@@ -91,6 +96,18 @@ class ChannelRepository:
                     ON videos(published_at);
                 """
             )
+            video_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(videos)").fetchall()
+            }
+            for name in (
+                "tags_json",
+                "categories_json",
+                "language",
+                "metadata_enriched_at",
+            ):
+                if name not in video_columns:
+                    connection.execute(f"ALTER TABLE videos ADD COLUMN {name} TEXT")
 
     def upsert_channel(self, channel: Channel) -> bool:
         """Upsert canonical metadata, returning True only for a new channel."""
@@ -287,8 +304,9 @@ class VideoRepository(ChannelRepository):
                     video_id, channel_id, title, description, published_at,
                     duration_seconds, view_count, like_count, comment_count,
                     thumbnail_url, webpage_url, availability, first_seen_at,
-                    last_checked_at, metadata_source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    last_checked_at, metadata_source, tags_json,
+                    categories_json, language, metadata_enriched_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 self._video_values(video),
             )
@@ -297,7 +315,7 @@ class VideoRepository(ChannelRepository):
                 connection.execute(
                     """
                     UPDATE videos SET
-                        channel_id = ?, title = ?,
+                        title = ?,
                         description = COALESCE(?, description),
                         published_at = COALESCE(?, published_at),
                         duration_seconds = COALESCE(?, duration_seconds),
@@ -307,11 +325,15 @@ class VideoRepository(ChannelRepository):
                         thumbnail_url = COALESCE(?, thumbnail_url),
                         webpage_url = COALESCE(?, webpage_url),
                         availability = COALESCE(?, availability),
-                        last_checked_at = ?, metadata_source = ?
+                        last_checked_at = COALESCE(?, last_checked_at),
+                        metadata_source = COALESCE(?, metadata_source),
+                        tags_json = COALESCE(?, tags_json),
+                        categories_json = COALESCE(?, categories_json),
+                        language = COALESCE(?, language),
+                        metadata_enriched_at = COALESCE(?, metadata_enriched_at)
                     WHERE video_id = ?
                     """,
                     (
-                        video.channel_id,
                         video.title,
                         video.description,
                         self._timestamp(video.published_at),
@@ -324,6 +346,10 @@ class VideoRepository(ChannelRepository):
                         video.availability,
                         self._timestamp(video.last_checked_at),
                         video.metadata_source,
+                        self._json(video.tags),
+                        self._json(video.categories),
+                        video.language,
+                        self._timestamp(video.metadata_enriched_at),
                         video.video_id,
                     ),
                 )
@@ -354,6 +380,36 @@ class VideoRepository(ChannelRepository):
                 "SELECT COUNT(*) FROM videos WHERE channel_id = ?", (channel_id,)
             ).fetchone()
         return int(row[0])
+
+    def count_videos_needing_enrichment(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM videos WHERE metadata_enriched_at IS NULL"
+            ).fetchone()
+        return int(row[0])
+
+    def count_enriched_videos(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM videos WHERE metadata_enriched_at IS NOT NULL"
+            ).fetchone()
+        return int(row[0])
+
+    def list_videos_needing_enrichment(
+        self, channel_id: str | None = None, limit: int | None = None
+    ) -> list[Video]:
+        sql = "SELECT * FROM videos WHERE metadata_enriched_at IS NULL"
+        parameters: list[object] = []
+        if channel_id is not None:
+            sql += " AND channel_id = ?"
+            parameters.append(channel_id)
+        sql += " ORDER BY first_seen_at, video_id"
+        if limit is not None:
+            sql += " LIMIT ?"
+            parameters.append(limit)
+        with self._connect() as connection:
+            rows = connection.execute(sql, parameters).fetchall()
+        return [self._video(row) for row in rows]
 
     def list_videos_for_channel(
         self, channel_id: str, limit: int | None = None
@@ -388,7 +444,15 @@ class VideoRepository(ChannelRepository):
             cls._timestamp(video.first_seen_at),
             cls._timestamp(video.last_checked_at),
             video.metadata_source,
+            cls._json(video.tags),
+            cls._json(video.categories),
+            video.language,
+            cls._timestamp(video.metadata_enriched_at),
         )
+
+    @staticmethod
+    def _json(value: list[str] | None) -> str | None:
+        return json.dumps(value, ensure_ascii=False) if value is not None else None
 
     @staticmethod
     def _video(row: sqlite3.Row) -> Video:
@@ -416,4 +480,16 @@ class VideoRepository(ChannelRepository):
                 else None
             ),
             metadata_source=row["metadata_source"],
+            tags=json.loads(row["tags_json"]) if row["tags_json"] else None,
+            categories=(
+                json.loads(row["categories_json"])
+                if row["categories_json"]
+                else None
+            ),
+            language=row["language"],
+            metadata_enriched_at=(
+                datetime.fromisoformat(row["metadata_enriched_at"])
+                if row["metadata_enriched_at"]
+                else None
+            ),
         )

@@ -18,7 +18,13 @@ from .collectors.channel_collector import (
     CrawlReport,
     UnknownChannelError,
 )
+from .collectors.video_metadata import (
+    EnrichmentBatchReport,
+    VideoMetadataProvider,
+    VideoMetadataService,
+)
 from .collectors.ytdlp_channel_video import YtDlpChannelVideoProvider
+from .collectors.ytdlp_video_metadata import YtDlpVideoMetadataProvider
 from .config import Config
 from .database.repository import ChannelRepository, VideoRepository
 from .discovery.channel_discovery import ChannelDiscoveryProvider, DiscoveryService
@@ -60,6 +66,7 @@ def doctor(
     _: argparse.Namespace,
     __: ChannelDiscoveryProvider | None = None,
     ___: ChannelVideoProvider | None = None,
+    ____: VideoMetadataProvider | None = None,
     repository: ChannelRepository | None = None,
 ) -> int:
     try:
@@ -94,6 +101,7 @@ def discover(
     args: argparse.Namespace,
     provider: ChannelDiscoveryProvider | None = None,
     _: ChannelVideoProvider | None = None,
+    __: VideoMetadataProvider | None = None,
     repository: ChannelRepository | None = None,
 ) -> int:
     service = DiscoveryService(
@@ -123,6 +131,7 @@ def stats(
     _: argparse.Namespace,
     __: ChannelDiscoveryProvider | None = None,
     ___: ChannelVideoProvider | None = None,
+    ____: VideoMetadataProvider | None = None,
     repository: ChannelRepository | None = None,
 ) -> int:
     database = _video_repository(repository)
@@ -130,6 +139,8 @@ def stats(
     print()
     print(f"Channels: {database.count_channels()}")
     print(f"Videos: {database.count_videos()}")
+    print(f"Metadata enriched: {database.count_enriched_videos()}")
+    print(f"Metadata pending: {database.count_videos_needing_enrichment()}")
     print("Transcripts: 0")
     print(f"Discovery relationships: {database.count_discovery_relationships()}")
     keyword_counts = database.discovery_keyword_counts()
@@ -163,6 +174,7 @@ def crawl(
     args: argparse.Namespace,
     _: ChannelDiscoveryProvider | None = None,
     provider: ChannelVideoProvider | None = None,
+    __: VideoMetadataProvider | None = None,
     repository: ChannelRepository | None = None,
 ) -> int:
     service = ChannelCrawlService(
@@ -184,6 +196,7 @@ def crawl_all(
     args: argparse.Namespace,
     _: ChannelDiscoveryProvider | None = None,
     provider: ChannelVideoProvider | None = None,
+    __: VideoMetadataProvider | None = None,
     repository: ChannelRepository | None = None,
 ) -> int:
     service = ChannelCrawlService(
@@ -203,12 +216,76 @@ def crawl_all(
     return 1 if report.failures else 0
 
 
+def _metadata_service(
+    provider: VideoMetadataProvider | None,
+    repository: ChannelRepository | None,
+) -> VideoMetadataService:
+    return VideoMetadataService(
+        provider or YtDlpVideoMetadataProvider(), _video_repository(repository)
+    )
+
+
+def _print_enrichment_batch(report: EnrichmentBatchReport) -> None:
+    print(f"Attempted: {report.attempted}")
+    print(f"Succeeded: {report.succeeded}")
+    print(f"Failed: {report.failed}")
+    for result in report.results:
+        if not result.success:
+            print(f"  {result.video_id}: {result.error}")
+
+
+def enrich(
+    args: argparse.Namespace,
+    _: ChannelDiscoveryProvider | None = None,
+    __: ChannelVideoProvider | None = None,
+    provider: VideoMetadataProvider | None = None,
+    repository: ChannelRepository | None = None,
+) -> int:
+    result = _metadata_service(provider, repository).enrich(args.video_id)
+    print(f"Video: {result.video_id}")
+    print(f"Enriched: {'yes' if result.success else 'no'}")
+    if result.error:
+        print(f"Error: {result.error}")
+    return 0 if result.success else 1
+
+
+def enrich_channel(
+    args: argparse.Namespace,
+    _: ChannelDiscoveryProvider | None = None,
+    __: ChannelVideoProvider | None = None,
+    provider: VideoMetadataProvider | None = None,
+    repository: ChannelRepository | None = None,
+) -> int:
+    try:
+        report = _metadata_service(provider, repository).enrich_channel(
+            _channel_id(args.channel), args.limit
+        )
+    except ValueError as error:
+        print(f"Enrichment failed: {error}", file=sys.stderr)
+        return 1
+    _print_enrichment_batch(report)
+    return 1 if report.failed else 0
+
+
+def enrich_pending(
+    args: argparse.Namespace,
+    _: ChannelDiscoveryProvider | None = None,
+    __: ChannelVideoProvider | None = None,
+    provider: VideoMetadataProvider | None = None,
+    repository: ChannelRepository | None = None,
+) -> int:
+    report = _metadata_service(provider, repository).enrich_pending(args.limit)
+    _print_enrichment_batch(report)
+    return 1 if report.failed else 0
+
+
 def placeholder(message: str):
     def run(
         _: argparse.Namespace,
         __: ChannelDiscoveryProvider | None = None,
         ___: ChannelVideoProvider | None = None,
-        ____: ChannelRepository | None = None,
+        ____: VideoMetadataProvider | None = None,
+        _____: ChannelRepository | None = None,
     ) -> int:
         print(f"Chua trien khai: {message}")
         return 0
@@ -225,7 +302,7 @@ def positive_int(value: str) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="crawl-yt", description="YouTube Intelligence Engine - Phase 1B"
+        prog="crawl-yt", description="YouTube Intelligence Engine - Phase 1C"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -252,6 +329,23 @@ def build_parser() -> argparse.ArgumentParser:
     crawl_all_parser.add_argument("--limit-per-channel", type=positive_int)
     crawl_all_parser.set_defaults(handler=crawl_all)
 
+    enrich_parser = subparsers.add_parser("enrich", help="Bo sung metadata video")
+    enrich_parser.add_argument("video_id")
+    enrich_parser.set_defaults(handler=enrich)
+
+    enrich_channel_parser = subparsers.add_parser(
+        "enrich-channel", help="Bo sung metadata video cua mot kenh"
+    )
+    enrich_channel_parser.add_argument("channel")
+    enrich_channel_parser.add_argument("--limit", type=positive_int, required=True)
+    enrich_channel_parser.set_defaults(handler=enrich_channel)
+
+    enrich_pending_parser = subparsers.add_parser(
+        "enrich-pending", help="Bo sung metadata video dang cho"
+    )
+    enrich_pending_parser.add_argument("--limit", type=positive_int, required=True)
+    enrich_pending_parser.set_defaults(handler=enrich_pending)
+
     stats_parser = subparsers.add_parser("stats", help="Hien thi thong ke")
     stats_parser.set_defaults(handler=stats)
     return parser
@@ -262,10 +356,13 @@ def main(
     *,
     discovery_provider: ChannelDiscoveryProvider | None = None,
     video_provider: ChannelVideoProvider | None = None,
+    metadata_provider: VideoMetadataProvider | None = None,
     repository: ChannelRepository | None = None,
 ) -> int:
     args = build_parser().parse_args(argv)
-    return args.handler(args, discovery_provider, video_provider, repository)
+    return args.handler(
+        args, discovery_provider, video_provider, metadata_provider, repository
+    )
 
 
 if __name__ == "__main__":

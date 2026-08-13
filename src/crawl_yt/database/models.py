@@ -44,6 +44,10 @@ class Video:
     availability: str | None = None
     last_checked_at: datetime | None = None
     metadata_source: str | None = None
+    tags: list[str] | None = None
+    categories: list[str] | None = None
+    language: str | None = None
+    metadata_enriched_at: datetime | None = None
 
 
 @dataclass(slots=True)
