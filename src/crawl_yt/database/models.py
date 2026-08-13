@@ -58,6 +58,35 @@ class ChannelScore:
 
 
 @dataclass(slots=True)
+class DiscoveryRun:
+    id: int | None
+    seed_keyword: str
+    started_at: datetime
+    completed_at: datetime | None
+    status: str
+    max_depth: int
+    channel_budget: int
+    query_budget: int
+    channels_discovered: int = 0
+    queries_executed: int = 0
+    error_message: str | None = None
+
+
+@dataclass(slots=True)
+class DiscoveryQuery:
+    id: int | None
+    run_id: int
+    query: str
+    depth: int
+    parent_query: str | None
+    source: str
+    status: str
+    channels_found: int = 0
+    new_channels: int = 0
+    executed_at: datetime | None = None
+
+
+@dataclass(slots=True)
 class Video:
     video_id: str
     channel_id: str

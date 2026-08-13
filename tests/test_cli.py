@@ -91,6 +91,19 @@ class CliTests(unittest.TestCase):
                 build_parser().parse_args([command, "--limit", "20"]).limit, 20
             )
 
+    def test_expansion_limits_are_required(self) -> None:
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            build_parser().parse_args(["expand", "retirement"])
+        args = build_parser().parse_args(
+            [
+                "expand", "retirement", "--max-depth", "2",
+                "--channel-budget", "500", "--query-budget", "30",
+                "--results-per-query", "20", "--dry-run",
+            ]
+        )
+        self.assertEqual((args.max_depth, args.channel_budget, args.query_budget), (2, 500, 30))
+        self.assertTrue(args.dry_run)
+
     def test_dry_run_does_not_persist(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = ChannelRepository(Path(directory) / "test.db")

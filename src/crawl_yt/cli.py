@@ -30,6 +30,7 @@ from .config import Config
 from .database.repository import ChannelRepository, TranscriptRepository, VideoRepository
 from .discovery.channel_discovery import ChannelDiscoveryProvider, DiscoveryService
 from .discovery.channel_scoring import ChannelScoringService, CrawlPriorityPolicy
+from .discovery.expansion import DiscoveryExpansionService
 from .discovery.ytdlp_provider import YtDlpDiscoveryProvider
 from .transcripts.opencli_provider import OpenCliTranscriptProvider
 from .transcripts.provider import (
@@ -158,6 +159,97 @@ def discover(
     )
     if args.dry_run:
         print("Dry run: database was not changed")
+    return 0
+
+
+def _print_expansion(report, channel_budget: int, query_budget: int) -> None:
+    print(f"Seed: {report.seed_keyword}")
+    print(f"Status: {report.status}")
+    if report.run_id is not None:
+        print(f"Run ID: {report.run_id}")
+    print(f"Queries executed: {report.queries_executed}/{query_budget}")
+    print(f"New channels: {report.new_channels}/{channel_budget}")
+    print(f"Existing channels rediscovered: {report.existing_channels}")
+    print(f"Max depth reached: {report.max_depth_reached}")
+    print(f"Generated queries: {len(report.generated_queries)}")
+    for query in report.generated_queries[:10]:
+        print(f"  {query}")
+    if report.top_channels:
+        print("Top discovered channels:")
+        for title, score, tier in report.top_channels:
+            print(f"  {score:5.1f} {tier:<7} {title}")
+    if report.failures:
+        print(f"Failed queries: {len(report.failures)}")
+
+
+def expand(
+    args: argparse.Namespace,
+    provider: ChannelDiscoveryProvider | None = None,
+    _: ChannelVideoProvider | None = None,
+    __: VideoMetadataProvider | None = None,
+    ___: TranscriptProvider | None = None,
+    repository: ChannelRepository | None = None,
+) -> int:
+    service = DiscoveryExpansionService(
+        provider or YtDlpDiscoveryProvider(), _video_repository(repository)
+    )
+    report = service.expand(
+        args.seed_keyword,
+        max_depth=args.max_depth,
+        channel_budget=args.channel_budget,
+        query_budget=args.query_budget,
+        results_per_query=args.results_per_query,
+        dry_run=args.dry_run,
+    )
+    _print_expansion(report, args.channel_budget, args.query_budget)
+    if args.dry_run:
+        print("Dry run: no provider calls and no database writes")
+    return 1 if report.status == "failed" else 0
+
+
+def discovery_runs(
+    args: argparse.Namespace,
+    _: ChannelDiscoveryProvider | None = None,
+    __: ChannelVideoProvider | None = None,
+    ___: VideoMetadataProvider | None = None,
+    ____: TranscriptProvider | None = None,
+    repository: ChannelRepository | None = None,
+) -> int:
+    rows = _video_repository(repository).list_discovery_runs(args.limit)
+    print("ID  Status          Queries  New channels  Seed")
+    for run in rows:
+        print(
+            f"{run.id:<3} {run.status:<15} {run.queries_executed:>7} "
+            f"{run.channels_discovered:>13}  {run.seed_keyword}"
+        )
+    return 0
+
+
+def discovery_run(
+    args: argparse.Namespace,
+    _: ChannelDiscoveryProvider | None = None,
+    __: ChannelVideoProvider | None = None,
+    ___: VideoMetadataProvider | None = None,
+    ____: TranscriptProvider | None = None,
+    repository: ChannelRepository | None = None,
+) -> int:
+    database = _video_repository(repository)
+    run = database.get_discovery_run(args.run_id)
+    if run is None:
+        print(f"Discovery run {args.run_id} not found", file=sys.stderr)
+        return 1
+    print(f"Run ID: {run.id}")
+    print(f"Seed: {run.seed_keyword}")
+    print(f"Status: {run.status}")
+    print(f"Queries executed: {run.queries_executed}/{run.query_budget}")
+    print(f"New channels: {run.channels_discovered}/{run.channel_budget}")
+    print(f"Max depth: {run.max_depth}")
+    print("Queries:")
+    for query in database.list_discovery_queries(run.id):
+        print(
+            f"  d{query.depth} {query.status:<9} {query.query} "
+            f"(found={query.channels_found}, new={query.new_channels}, source={query.source})"
+        )
     return 0
 
 
@@ -583,6 +675,29 @@ def build_parser() -> argparse.ArgumentParser:
     discover_parser.add_argument("--limit", type=positive_int, default=50)
     discover_parser.add_argument("--dry-run", action="store_true")
     discover_parser.set_defaults(handler=discover)
+
+    expand_parser = subparsers.add_parser(
+        "expand", help="Mo rong discovery co gioi han"
+    )
+    expand_parser.add_argument("seed_keyword")
+    expand_parser.add_argument("--max-depth", type=positive_int, required=True)
+    expand_parser.add_argument("--channel-budget", type=positive_int, required=True)
+    expand_parser.add_argument("--query-budget", type=positive_int, required=True)
+    expand_parser.add_argument("--results-per-query", type=positive_int, default=20)
+    expand_parser.add_argument("--dry-run", action="store_true")
+    expand_parser.set_defaults(handler=expand)
+
+    runs_parser = subparsers.add_parser(
+        "discovery-runs", help="Liet ke cac lan mo rong discovery"
+    )
+    runs_parser.add_argument("--limit", type=positive_int, required=True)
+    runs_parser.set_defaults(handler=discovery_runs)
+
+    run_parser = subparsers.add_parser(
+        "discovery-run", help="Chi tiet mot lan mo rong discovery"
+    )
+    run_parser.add_argument("run_id", type=positive_int)
+    run_parser.set_defaults(handler=discovery_run)
 
     add_parser = subparsers.add_parser("add-channel", help="Them mot kenh")
     add_parser.add_argument("youtube_channel_url")

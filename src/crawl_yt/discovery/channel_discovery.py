@@ -30,6 +30,7 @@ class DiscoveryReport:
     new_discovery_relationships: int
     existing_discovery_relationships: int
     channels: list[Channel]
+    new_channel_ids: list[str]
 
 
 class DiscoveryService:
@@ -40,16 +41,29 @@ class DiscoveryService:
         self.repository = repository
 
     def discover(
-        self, keyword: str, limit: int = 50, dry_run: bool = False
+        self,
+        keyword: str,
+        limit: int = 50,
+        dry_run: bool = False,
+        max_new_channels: int | None = None,
     ) -> DiscoveryReport:
         batch = self.provider.search(keyword, limit)
         unique = {channel.channel_id: channel for channel in batch.channels}
         new_channels = existing_channels = 0
+        new_channel_ids: list[str] = []
         new_relationships = existing_relationships = 0
+        processed: list[Channel] = []
 
         for channel in unique.values():
+            known = self.repository.get_channel(channel.channel_id) is not None
+            if (
+                not known
+                and max_new_channels is not None
+                and new_channels >= max_new_channels
+            ):
+                continue
             if dry_run:
-                is_new_channel = self.repository.get_channel(channel.channel_id) is None
+                is_new_channel = not known
                 is_new_relationship = not self.repository.discovery_exists(
                     channel.channel_id, keyword, batch.source
                 )
@@ -59,6 +73,9 @@ class DiscoveryService:
                     channel.channel_id, keyword, batch.source
                 )
             new_channels += is_new_channel
+            processed.append(channel)
+            if is_new_channel:
+                new_channel_ids.append(channel.channel_id)
             existing_channels += not is_new_channel
             new_relationships += is_new_relationship
             existing_relationships += not is_new_relationship
@@ -71,5 +88,6 @@ class DiscoveryService:
             existing_channels=existing_channels,
             new_discovery_relationships=new_relationships,
             existing_discovery_relationships=existing_relationships,
-            channels=list(unique.values()),
+            channels=processed,
+            new_channel_ids=new_channel_ids,
         )

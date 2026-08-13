@@ -14,6 +14,8 @@ from .models import (
     ChannelCrawlState,
     ChannelScore,
     ChannelDiscovery,
+    DiscoveryQuery,
+    DiscoveryRun,
     Transcript,
     TranscriptAttempt,
     Video,
@@ -181,6 +183,44 @@ class ChannelRepository:
                     ON channel_scores(tier);
                 CREATE INDEX IF NOT EXISTS idx_channel_scores_scored_at
                     ON channel_scores(scored_at);
+                CREATE TABLE IF NOT EXISTS discovery_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    seed_keyword TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    status TEXT NOT NULL CHECK (
+                        status IN ('running', 'completed', 'failed', 'stopped_budget')
+                    ),
+                    max_depth INTEGER NOT NULL,
+                    channel_budget INTEGER NOT NULL,
+                    query_budget INTEGER NOT NULL,
+                    channels_discovered INTEGER NOT NULL DEFAULT 0,
+                    queries_executed INTEGER NOT NULL DEFAULT 0,
+                    error_message TEXT
+                );
+                CREATE TABLE IF NOT EXISTS discovery_queries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id INTEGER NOT NULL,
+                    query TEXT NOT NULL,
+                    depth INTEGER NOT NULL,
+                    parent_query TEXT,
+                    source TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (
+                        status IN ('pending', 'completed', 'failed')
+                    ),
+                    channels_found INTEGER NOT NULL DEFAULT 0,
+                    new_channels INTEGER NOT NULL DEFAULT 0,
+                    executed_at TEXT,
+                    FOREIGN KEY (run_id) REFERENCES discovery_runs(id)
+                        ON DELETE CASCADE,
+                    UNIQUE (run_id, query)
+                );
+                CREATE INDEX IF NOT EXISTS idx_discovery_queries_run_id
+                    ON discovery_queries(run_id);
+                CREATE INDEX IF NOT EXISTS idx_discovery_queries_depth
+                    ON discovery_queries(depth);
+                CREATE INDEX IF NOT EXISTS idx_discovery_queries_status
+                    ON discovery_queries(status);
                 """
             )
             video_columns = {
@@ -330,6 +370,17 @@ class ChannelRepository:
             ).fetchall()
         return [(str(row[0]), int(row[1])) for row in rows]
 
+    def list_channel_ids_for_keyword(self, keyword: str) -> list[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT channel_id FROM channel_discoveries
+                WHERE lower(trim(keyword)) = lower(trim(?)) ORDER BY channel_id
+                """,
+                (keyword,),
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
     def _count(self, table: str) -> int:
         if table not in {"channels", "channel_discoveries"}:
             raise ValueError("unsupported table")
@@ -382,6 +433,200 @@ class ChannelRepository:
 
 
 class VideoRepository(ChannelRepository):
+    def create_discovery_run(self, run: DiscoveryRun) -> DiscoveryRun:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO discovery_runs (
+                    seed_keyword, started_at, completed_at, status, max_depth,
+                    channel_budget, query_budget, channels_discovered,
+                    queries_executed, error_message
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run.seed_keyword,
+                    self._timestamp(run.started_at),
+                    self._timestamp(run.completed_at),
+                    run.status,
+                    run.max_depth,
+                    run.channel_budget,
+                    run.query_budget,
+                    run.channels_discovered,
+                    run.queries_executed,
+                    run.error_message,
+                ),
+            )
+            run.id = int(cursor.lastrowid)
+        return run
+
+    def finish_discovery_run(
+        self,
+        run_id: int,
+        status: str,
+        channels_discovered: int,
+        queries_executed: int,
+        error_message: str | None = None,
+        completed_at: datetime | None = None,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE discovery_runs SET completed_at = ?, status = ?,
+                    channels_discovered = ?, queries_executed = ?, error_message = ?
+                WHERE id = ?
+                """,
+                (
+                    self._timestamp(completed_at or datetime.now(timezone.utc)),
+                    status,
+                    channels_discovered,
+                    queries_executed,
+                    error_message,
+                    run_id,
+                ),
+            )
+
+    def get_discovery_run(self, run_id: int) -> DiscoveryRun | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM discovery_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+        return self._discovery_run(row) if row else None
+
+    def list_discovery_runs(self, limit: int) -> list[DiscoveryRun]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM discovery_runs ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [self._discovery_run(row) for row in rows]
+
+    def add_discovery_query(self, query: DiscoveryQuery) -> DiscoveryQuery:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO discovery_queries (
+                    run_id, query, depth, parent_query, source, status,
+                    channels_found, new_channels, executed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    query.run_id,
+                    query.query,
+                    query.depth,
+                    query.parent_query,
+                    query.source,
+                    query.status,
+                    query.channels_found,
+                    query.new_channels,
+                    self._timestamp(query.executed_at),
+                ),
+            )
+            query.id = int(cursor.lastrowid)
+        return query
+
+    def finish_discovery_query(
+        self,
+        query_id: int,
+        status: str,
+        channels_found: int,
+        new_channels: int,
+        executed_at: datetime | None = None,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE discovery_queries SET status = ?, channels_found = ?,
+                    new_channels = ?, executed_at = ? WHERE id = ?
+                """,
+                (
+                    status,
+                    channels_found,
+                    new_channels,
+                    self._timestamp(executed_at or datetime.now(timezone.utc)),
+                    query_id,
+                ),
+            )
+
+    def list_discovery_queries(self, run_id: int) -> list[DiscoveryQuery]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM discovery_queries WHERE run_id = ? ORDER BY id",
+                (run_id,),
+            ).fetchall()
+        return [self._discovery_query(row) for row in rows]
+
+    def get_expansion_inputs(self, channel_id: str) -> dict[str, object]:
+        channel = self.get_channel(channel_id)
+        if channel is None:
+            raise ValueError(f"channel {channel_id} is not in the database")
+        discoveries = [
+            item.keyword for item in self.list_discoveries_for_channel(channel_id)
+        ]
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT title, tags_json, categories_json FROM videos
+                WHERE channel_id = ?
+                ORDER BY published_at IS NULL, published_at DESC, first_seen_at DESC
+                LIMIT 10
+                """,
+                (channel_id,),
+            ).fetchall()
+        tags: list[str] = []
+        titles: list[str] = []
+        for row in rows:
+            titles.append(str(row["title"]))
+            tags.extend(json.loads(row["tags_json"]) if row["tags_json"] else [])
+            tags.extend(
+                json.loads(row["categories_json"])
+                if row["categories_json"]
+                else []
+            )
+        return {
+            "channel_title": channel.title,
+            "discovery_keywords": discoveries,
+            "video_titles": titles,
+            "tags": tags,
+        }
+
+    @staticmethod
+    def _discovery_run(row: sqlite3.Row) -> DiscoveryRun:
+        return DiscoveryRun(
+            id=int(row["id"]),
+            seed_keyword=row["seed_keyword"],
+            started_at=datetime.fromisoformat(row["started_at"]),
+            completed_at=(
+                datetime.fromisoformat(row["completed_at"])
+                if row["completed_at"]
+                else None
+            ),
+            status=row["status"],
+            max_depth=int(row["max_depth"]),
+            channel_budget=int(row["channel_budget"]),
+            query_budget=int(row["query_budget"]),
+            channels_discovered=int(row["channels_discovered"]),
+            queries_executed=int(row["queries_executed"]),
+            error_message=row["error_message"],
+        )
+
+    @staticmethod
+    def _discovery_query(row: sqlite3.Row) -> DiscoveryQuery:
+        return DiscoveryQuery(
+            id=int(row["id"]),
+            run_id=int(row["run_id"]),
+            query=row["query"],
+            depth=int(row["depth"]),
+            parent_query=row["parent_query"],
+            source=row["source"],
+            status=row["status"],
+            channels_found=int(row["channels_found"]),
+            new_channels=int(row["new_channels"]),
+            executed_at=(
+                datetime.fromisoformat(row["executed_at"])
+                if row["executed_at"]
+                else None
+            ),
+        )
+
     def upsert_channel_score(self, score: ChannelScore) -> None:
         with self._connect() as connection:
             connection.execute(

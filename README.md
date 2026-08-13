@@ -1,6 +1,6 @@
 # crawl-yt
 
-Nen tang Phase 2B cho YouTube Intelligence Engine. Du an tim channel, liet ke
+Nen tang Phase 2C cho YouTube Intelligence Engine. Du an tim channel, liet ke
 video, bo sung metadata va luu transcript theo timestamp. YouTube captions la
 duong mac dinh re; audio va ASR cuc bo luon la fallback dat tien, phai bat ro.
 
@@ -22,13 +22,17 @@ python -m pip install -e ".[asr]"
 Lenh tren cai `faster-whisper` vao virtualenv cua project. Khong can thay doi
 CUDA driver/toolkit he thong.
 
-## Lenh Phase 2B
+## Lenh Phase 2C
 
 ```powershell
 python main.py doctor
 python main.py discover "retirement"
 python main.py discover "retirement" --limit 100
 python main.py discover "retirement" --dry-run
+python main.py expand "retirement" --max-depth 2 --channel-budget 500 --query-budget 30 --results-per-query 20
+python main.py expand "retirement" --max-depth 2 --channel-budget 500 --query-budget 30 --dry-run
+python main.py discovery-runs --limit 20
+python main.py discovery-run 1
 python main.py crawl UCxxxxxxxxxxxx --limit 20
 python main.py crawl UCxxxxxxxxxxxx
 python main.py crawl UCxxxxxxxxxxxx --full
@@ -86,6 +90,19 @@ Tier `high` tu 70, `medium` tu 40, con lai la `low`. Sau mot crawl thanh cong,
 tier quyet dinh lan tiep theo: high 12 gio, medium 24 gio, low 72 gio, unscored
 24 gio. Scoring chi thay doi uu tien; khong xoa channel. Khi activity/traction
 thieu, v1 dung diem neutral va ha confidence thay vi coi NULL la 0.
+
+Discovery expansion dung frontier co uu tien, khong recursion an trong provider.
+Moi run bat buoc co `--max-depth`, `--channel-budget` va `--query-budget`;
+`--results-per-query` mac dinh 20. Channel cu khong tieu channel budget, query
+da normalize bang trim/collapse whitespace/casefold khong duoc chay lai trong
+cung run. Mot channel tao toi da 3 candidate va mot query cha them toi da 5
+frontier item.
+
+Chi channel co score tu 50 moi tao query mo rong. Candidate chi den tu discovery
+keyword, channel title, recent video title va tag/category da co trong SQLite;
+stopword/junk va phrase ngoai 2-6 tu bi loai. `--dry-run` chi lap ke hoach tu du
+lieu local, khong goi YouTube va khong ghi run/channel. `discovery-runs` hien
+lich su ngan gon; `discovery-run ID` hien provenance query, depth va ket qua.
 
 Enumeration la thao tac nhe: yt-dlp doc flat upload list, khong fetch full tung
 video. Enrichment nang hon: moi video tao mot full metadata request nhung van
