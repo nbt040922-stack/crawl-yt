@@ -1,0 +1,1 @@
+"""Future OpenCLI transcript provider."""
