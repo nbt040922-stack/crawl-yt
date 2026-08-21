@@ -48,6 +48,10 @@ def create_app(
     app = FastAPI(title="crawl-yt dashboard")
     app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
 
+    @app.exception_handler(HTTPException)
+    async def friendly_http_error(request: Request, exc: HTTPException) -> HTMLResponse:
+        return HTMLResponse(str(exc.detail), status_code=exc.status_code)
+
     @app.exception_handler(Exception)
     async def friendly_error(request: Request, exc: Exception) -> HTMLResponse:
         if isinstance(exc, HTTPException):
@@ -117,17 +121,15 @@ def create_app(
         return render(request, "discovery_keyword.html", title=f"Discovery: {keyword}", keyword=keyword, rows=rows, page=page, per_page=per_page, total=total)
 
     @app.get("/channels", response_class=HTMLResponse)
-    def channels(request: Request, page: int = 1, per_page: str = "50", search: str | None = None, tier: str | None = None, keyword: str | None = None, min_videos_per_week: float | None = None, min_score: float | None = None, sort: str = "score", message: str | None = None) -> HTMLResponse:
+    def channels(request: Request, page: int = 1, per_page: str = "50", search: str | None = None, tier: str | None = None, keyword: str | None = None, min_videos_per_week: str | None = None, min_score: str | None = None, sort: str = "score", message: str | None = None) -> HTMLResponse:
         try:
             requested_page_size = int(per_page)
         except (TypeError, ValueError):
             requested_page_size = 50
         per_page = requested_page_size if requested_page_size in {25, 50, 100} else 50
         page = max(page, 1)
-        if min_videos_per_week is not None and min_videos_per_week < 0:
-            raise HTTPException(400, "minimum videos/week cannot be negative")
-        if min_score is not None and not 0 <= min_score <= 100:
-            raise HTTPException(400, "minimum score must be between 0 and 100")
+        min_videos_per_week = _parse_optional_float(min_videos_per_week, "minimum videos/week", minimum=0)
+        min_score = _parse_optional_float(min_score, "minimum score", minimum=0, maximum=100)
         if sort not in {"score", "cadence", "subscribers"}:
             sort = "score"
         total = database.count_channels_page(search, tier, keyword, min_videos_per_week, min_score)
@@ -141,12 +143,12 @@ def create_app(
 
     @app.get("/channels/export.xlsx")
     def export_channels(search: str | None = None, tier: str | None = None,
-                        keyword: str | None = None, min_videos_per_week: float | None = None,
-                        min_score: float = 60, sort: str = "score") -> StreamingResponse:
-        if min_score < 0 or min_score > 100:
-            raise HTTPException(400, "minimum score must be between 0 and 100")
-        if min_videos_per_week is not None and min_videos_per_week < 0:
-            raise HTTPException(400, "minimum videos/week cannot be negative")
+                        keyword: str | None = None, min_videos_per_week: str | None = None,
+                        min_score: str | None = None, sort: str = "score") -> StreamingResponse:
+        min_videos_per_week = _parse_optional_float(min_videos_per_week, "minimum videos/week", minimum=0)
+        min_score = _parse_optional_float(min_score, "minimum score", minimum=0, maximum=100)
+        if min_score is None:
+            min_score = 60
         if sort not in {"score", "cadence", "subscribers"}:
             sort = "score"
         try:
@@ -392,6 +394,27 @@ def _crawl_state_view(state: Any | None, score: Any | None = None) -> dict[str, 
 def _format_interval(value) -> str:
     days = value.days
     return f"{days} day" if days == 1 else f"{days} days"
+
+
+def _parse_optional_float(
+    value: str | None,
+    field_name: str,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float | None:
+    if value is None or not value.strip():
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as error:
+        raise HTTPException(400, f"{field_name} must be a number") from error
+    if minimum is not None and parsed < minimum:
+        if maximum is not None:
+            raise HTTPException(400, f"{field_name} must be between {minimum:g} and {maximum:g}")
+        raise HTTPException(400, f"{field_name} cannot be negative")
+    if maximum is not None and parsed > maximum:
+        raise HTTPException(400, f"{field_name} must be between {minimum:g} and {maximum:g}")
+    return parsed
 
 
 def _channels_workbook(rows: list[dict[str, object]]) -> Workbook:

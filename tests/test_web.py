@@ -395,6 +395,41 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("50,000", response.text)
 
+    def test_optional_numeric_channel_filters_accept_blank_values(self) -> None:
+        for query in ("min_score=", "min_videos_per_week=", "min_score=&min_videos_per_week="):
+            response = self.client.get(f"/channels?{query}")
+            self.assertEqual(response.status_code, 200)
+        response = self.client.get("/channels?min_score=abc")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("minimum score must be a number", response.text)
+        self.assertNotIn('"detail"', response.text)
+        response = self.client.get("/channels?min_videos_per_week=abc")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("minimum videos/week must be a number", response.text)
+
+    def test_optional_numeric_channel_filters_validate_ranges_and_decimals(self) -> None:
+        for query in ("min_score=60", "min_score=60.5", "min_videos_per_week=3", "min_videos_per_week=3.5"):
+            self.assertEqual(self.client.get(f"/channels?{query}").status_code, 200)
+        for query in ("min_score=101", "min_score=-1", "min_videos_per_week=-1"):
+            self.assertEqual(self.client.get(f"/channels?{query}").status_code, 400)
+
+    def test_channel_pagination_urls_omit_blank_numeric_filters(self) -> None:
+        for number in range(51):
+            self.repository.upsert_channel(Channel(f"PAGE{number:02d}", f"Page {number:02d}"))
+        response = self.client.get("/channels?page=2&min_score=&min_videos_per_week=&keyword=retirement")
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("min_score=", response.text)
+        self.assertNotIn("min_videos_per_week=", response.text)
+
+    def test_export_blank_score_defaults_to_60_and_blank_cadence_is_ignored(self) -> None:
+        captured: list[dict[str, object]] = []
+        self.repository.list_channels_for_export = lambda **kwargs: (captured.append(kwargs) or [])
+        self.assertEqual(self.client.get("/channels/export.xlsx?min_score=&min_videos_per_week=").status_code, 400)
+        self.assertEqual(captured[-1]["min_score"], 60)
+        self.assertIsNone(captured[-1]["min_videos_per_week"])
+        self.assertEqual(self.client.get("/channels/export.xlsx?min_score=70").status_code, 400)
+        self.assertEqual(captured[-1]["min_score"], 70)
+
     def test_channel_zero_subscribers_is_not_missing(self) -> None:
         self.repository.upsert_channel(Channel("UC0", "Zero", subscriber_count=0))
         response = self.client.get("/channels/UC0")
