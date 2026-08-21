@@ -37,6 +37,13 @@ class DiscoveryNormalizationTests(unittest.TestCase):
         self.assertIn("COUNT(DISTINCT channel_id)", source)
         self.assertNotIn("grouped =", source)
 
+    def test_count_channels_for_keyword_uses_canonical_value(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = ChannelRepository(Path(directory) / "db.sqlite")
+            repository.upsert_channel(Channel("UC1", "One"))
+            repository.record_discovery("UC1", "retirement", "seed")
+            self.assertEqual(repository.count_channels_for_keyword(" RETIREMENT "), 1)
+
     def test_history_uses_distinct_counts_and_min_max(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = ChannelRepository(Path(directory) / "db.sqlite")

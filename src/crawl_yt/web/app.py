@@ -282,6 +282,7 @@ def _channel_score_view(score: Any | None) -> dict[str, Any] | None:
     reasons = score.reasons if isinstance(score.reasons, dict) else {}
     rate_30 = reasons.get("videos_per_week_30d", score.videos_per_week_30d)
     rate_90 = reasons.get("videos_per_week_90d", score.videos_per_week_90d)
+    coverage_30 = reasons.get("observation_coverage_30d", False)
     return {
         "overall": score.score,
         "tier": str(score.tier).upper(),
@@ -289,8 +290,9 @@ def _channel_score_view(score: Any | None) -> dict[str, Any] | None:
         "version": score.scoring_version,
         "scored_at": _format_datetime(score.scored_at),
         "notes": list(reasons.get("notes", [])),
-        "videos_per_week_30d": rate_30,
-        "videos_per_week_90d": rate_90,
+        "videos_per_week_30d": rate_30 if coverage_30 else None,
+        "videos_per_week_90d": rate_90 if coverage_30 else None,
+        "observation_coverage_30d": coverage_30,
         "cadence_fit": reasons.get("cadence_fit", "unknown"),
         "consistency": reasons.get("consistency", "unknown"),
         "maturity": reasons.get("score_maturity", "preliminary"),

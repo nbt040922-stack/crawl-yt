@@ -242,7 +242,7 @@ class WebTests(unittest.TestCase):
         self.assertNotIn("<pre>None</pre>", response.text)
 
     def test_scored_channel_renders_structured_score_and_reasons(self) -> None:
-        self.repository.upsert_channel_score(ChannelScore("UC1", 82.4, 91.0, 78.5, 74.2, 85.0, "high", {"notes": ["active uploader"], "videos_per_week_30d": 5.8, "videos_per_week_90d": 5.4, "cadence_fit": "very good", "consistency": "high", "score_maturity": "mature"}, datetime.now(timezone.utc), "v2", 78.5, 5.8, 5.4))
+        self.repository.upsert_channel_score(ChannelScore("UC1", 82.4, 91.0, 78.5, 74.2, 85.0, "high", {"notes": ["active uploader"], "videos_per_week_30d": 5.8, "videos_per_week_90d": 5.4, "observation_coverage_30d": True, "cadence_fit": "very good", "consistency": "high", "score_maturity": "mature"}, datetime.now(timezone.utc), "v2", 78.5, 5.8, 5.4))
         response = self.client.get("/channels/UC1")
         for label in ("Overall Score", "82.4", "HIGH", "Relevance", "Upload cadence", "Traction", "Confidence", "Scoring version", "v2", "5.8 videos/week", "5.4 videos/week", "VERY GOOD", "HIGH", "active uploader"):
             self.assertIn(label, response.text)
@@ -250,8 +250,8 @@ class WebTests(unittest.TestCase):
 
     def test_channels_table_supports_cadence_filter_and_sort(self) -> None:
         now = datetime.now(timezone.utc)
-        self.repository.upsert_channel_score(ChannelScore("UC1", 70, 70, 80, 60, 60, "high", {}, now, "v2", 80, 5.8, 5.0))
-        self.repository.upsert_channel_score(ChannelScore("UC2", 80, 80, 60, 70, 70, "high", {}, now, "v2", 60, 2.0, 2.0))
+        self.repository.upsert_channel_score(ChannelScore("UC1", 70, 70, 80, 60, 60, "high", {"observation_coverage_30d": True, "cadence_fit": "very good"}, now, "v2", 80, 5.8, 5.0))
+        self.repository.upsert_channel_score(ChannelScore("UC2", 80, 80, 60, 70, 70, "high", {"observation_coverage_30d": True, "cadence_fit": "below target"}, now, "v2", 60, 2.0, 2.0))
         filtered = self.client.get("/channels?min_videos_per_week=5").text
         self.assertIn("One", filtered)
         self.assertNotIn('href="/channels/UC2"', filtered)
@@ -259,6 +259,14 @@ class WebTests(unittest.TestCase):
         self.assertLess(sorted_page.index("One"), sorted_page.index("Two"))
         self.assertIn("Videos/week", sorted_page)
         self.assertIn("5.8 / week", sorted_page)
+        self.assertIn("Cadence fit", sorted_page)
+
+    def test_channels_table_hides_insufficient_cadence_coverage(self) -> None:
+        now = datetime.now(timezone.utc)
+        self.repository.upsert_channel_score(ChannelScore("UC1", 70, 70, 80, 60, 60, "high", {"videos_per_week_30d": 5.8, "observation_coverage_30d": False}, now, "v2", 80, 5.8, 5.0))
+        response = self.client.get("/channels?min_videos_per_week=5")
+        self.assertNotIn('href="/channels/UC1"', response.text)
+        self.assertIn("Not enough data", self.client.get("/channels").text)
 
     def test_score_post_redirects_and_score_appears(self) -> None:
         response = self.client.post("/channels/UC1/score", follow_redirects=False)

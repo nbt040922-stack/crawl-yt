@@ -437,7 +437,10 @@ class ChannelRepository:
             clauses.append("EXISTS (SELECT 1 FROM channel_discoveries cd WHERE cd.channel_id = c.channel_id AND cd.normalized_keyword = ?)")
             parameters.append(normalize_discovery_keyword(keyword))
         if min_videos_per_week is not None:
-            clauses.append("cs.videos_per_week_30d >= ?")
+            clauses.append(
+                "json_extract(cs.reason_json, '$.observation_coverage_30d') = 1 "
+                "AND cs.videos_per_week_30d >= ?"
+            )
             parameters.append(min_videos_per_week)
         order_by = {
             "score": "cs.score IS NULL, cs.score DESC, c.channel_id",
@@ -450,7 +453,10 @@ class ChannelRepository:
                 f"""
                 SELECT c.*, cs.score AS score, cs.tier AS tier,
                        s.last_success_at, s.next_crawl_at, s.consecutive_failures,
-                       cs.videos_per_week_30d AS videos_per_week_30d,
+                       CASE WHEN json_extract(cs.reason_json, '$.observation_coverage_30d') = 1
+                            THEN cs.videos_per_week_30d END AS videos_per_week_30d,
+                       CASE WHEN json_extract(cs.reason_json, '$.observation_coverage_30d') = 1
+                            THEN json_extract(cs.reason_json, '$.cadence_fit') END AS cadence_fit,
                        (SELECT COUNT(*) FROM videos v WHERE v.channel_id = c.channel_id) AS observed_videos,
                        (SELECT GROUP_CONCAT(DISTINCT cd.keyword) FROM channel_discoveries cd
                         WHERE cd.channel_id = c.channel_id) AS discovery_keywords
@@ -482,7 +488,10 @@ class ChannelRepository:
             clauses.append("EXISTS (SELECT 1 FROM channel_discoveries cd WHERE cd.channel_id = c.channel_id AND cd.normalized_keyword = ?)")
             parameters.append(normalize_discovery_keyword(keyword))
         if min_videos_per_week is not None:
-            clauses.append("cs.videos_per_week_30d >= ?")
+            clauses.append(
+                "json_extract(cs.reason_json, '$.observation_coverage_30d') = 1 "
+                "AND cs.videos_per_week_30d >= ?"
+            )
             parameters.append(min_videos_per_week)
         with self._connect() as connection:
             row = connection.execute(
@@ -542,13 +551,14 @@ class ChannelRepository:
         return self._count("channel_discoveries")
 
     def count_channels_for_keyword(self, keyword: str) -> int:
+        canonical = normalize_discovery_keyword(keyword)
         with self._connect() as connection:
             row = connection.execute(
                 """
                 SELECT COUNT(DISTINCT channel_id)
-                FROM channel_discoveries WHERE keyword = ?
+                FROM channel_discoveries WHERE normalized_keyword = ?
                 """,
-                (keyword,),
+                (canonical,),
             ).fetchone()
         return int(row[0])
 
@@ -1420,6 +1430,15 @@ class VideoRepository(ChannelRepository):
                     (channel_id,),
                 ).fetchall()
             ]
+            recent_views = [
+                int(item[0])
+                for item in connection.execute(
+                    "SELECT view_count FROM videos "
+                    "WHERE channel_id = ? AND metadata_enriched_at IS NOT NULL "
+                    "AND view_count IS NOT NULL AND published_at >= ?",
+                    (channel_id, cutoff_30),
+                ).fetchall()
+            ]
         return {
             "channel": self._channel(row),
             "discovery_keywords": int(row["discovery_keywords"]),
@@ -1435,6 +1454,7 @@ class VideoRepository(ChannelRepository):
             "published_dates": published_dates,
             "enriched_videos": int(row["enriched_videos"]),
             "enriched_view_counts": views,
+            "recent_enriched_view_counts": recent_views,
         }
 
     @staticmethod

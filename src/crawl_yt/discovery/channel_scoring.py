@@ -168,9 +168,18 @@ class ChannelScoringService:
         else:
             history_span_days = 0
             active_weeks_ratio = None
+        cadence_stability = None
+        if rate_30 is not None and rate_90 is not None and max(rate_30, rate_90) > 0:
+            cadence_stability = min(rate_30, rate_90) / max(rate_30, rate_90)
 
         views = [int(value) for value in signals["enriched_view_counts"]]
-        median_views = float(statistics.median(views)) if len(views) >= 3 else None
+        recent_views = [int(value) for value in signals["recent_enriched_view_counts"]]
+        if len(recent_views) >= 3:
+            median_views = float(statistics.median(recent_views))
+            median_views_source = "recent"
+        else:
+            median_views = float(statistics.median(views)) if len(views) >= 3 else None
+            median_views_source = "all_observed" if median_views is not None else None
         traction_parts: list[float] = []
         if channel.subscriber_count is not None and channel.subscriber_count >= 0:
             traction_parts.append(min(100.0, math.log10(channel.subscriber_count + 1) / 7 * 100))
@@ -190,7 +199,7 @@ class ChannelScoringService:
             value is not None
             for value in (channel.subscriber_count, channel.view_count, channel.video_count)
         )
-        consistency_evidence = active_weeks_ratio or 0.0
+        consistency_evidence = (active_weeks_ratio or 0.0) * (cadence_stability or 0.0)
         confidence = (
             metadata_fields / 3 * 25
             + min(1.0, observed / 20) * 20
@@ -245,6 +254,7 @@ class ChannelScoringService:
             "cadence_score": cadence,
             "cadence_fit": cadence_fit(rate_30),
             "active_weeks_ratio": active_weeks_ratio,
+            "cadence_stability": cadence_stability,
             "observation_span_days": history_span_days,
             "observation_coverage_30d": history_span_days >= 21,
             "observation_coverage_90d": history_span_days >= 60,
@@ -254,6 +264,7 @@ class ChannelScoringService:
             "published_videos": published,
             "enriched_videos": enriched,
             "median_enriched_views": median_views,
+            "median_enriched_views_source": median_views_source,
             "view_subscriber_ratio": view_subscriber_ratio,
             "score_maturity": maturity,
             "latest_video_days_ago": latest_days,

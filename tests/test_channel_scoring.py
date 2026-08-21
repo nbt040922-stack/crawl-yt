@@ -149,6 +149,23 @@ class ChannelScoringTests(unittest.TestCase):
         self.assertGreater(recent.reasons["videos_per_week_30d"], steady.reasons["videos_per_week_30d"])
         self.assertLess(recent.reasons["active_weeks_ratio"], 1.0)
 
+    def test_mismatched_recent_and_long_term_rates_reduce_consistency_evidence(self) -> None:
+        self.add_channel("steady")
+        self.add_channel("surge")
+        self.add_videos("steady", list(range(0, 90, 7)))
+        self.add_videos("surge", list(range(0, 30, 4)) + list(range(35, 90, 14)))
+        steady = self.service.score_channel("steady", NOW)
+        surge = self.service.score_channel("surge", NOW)
+        self.assertGreater(steady.reasons["cadence_stability"], surge.reasons["cadence_stability"])
+        self.assertGreater(steady.confidence_score, surge.confidence_score)
+
+    def test_recent_enriched_views_are_preferred_when_sample_is_sufficient(self) -> None:
+        self.add_channel("recent", subscribers=50_000)
+        self.add_videos("recent", [1, 2, 3, 80, 81, 82], [10_000, 10_000, 10_000, 1_000_000, 1_000_000, 1_000_000])
+        result = self.service.score_channel("recent", NOW)
+        self.assertEqual(result.reasons["median_enriched_views"], 10_000)
+        self.assertEqual(result.reasons["median_enriched_views_source"], "recent")
+
     def test_consistency_rewards_regular_uploads_over_burst(self) -> None:
         self.add_channel("regular")
         self.add_channel("burst")
