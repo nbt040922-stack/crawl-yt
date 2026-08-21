@@ -23,7 +23,12 @@ class DiscoveryFake:
 
     def search(self, keyword, limit):
         self.calls.append((keyword, limit))
-        return DiscoveryBatch(1, [Channel("UC2", "Two")], "fake")
+        return DiscoveryBatch(2, [Channel("UC1", "One", channel_url="https://youtube.com/channel/UC1"), Channel("UC2", "Two", channel_url="https://youtube.com/channel/UC2")], "fake")
+
+
+class EmptyDiscoveryFake:
+    def search(self, keyword, limit):
+        return DiscoveryBatch(0, [], "fake")
 
 
 class VideoFake:
@@ -149,6 +154,32 @@ class WebTests(unittest.TestCase):
         self.assertEqual(provider.calls, [])
         self.assertEqual(app_client.post("/discovery", data={"keyword": "retirement", "limit": "1"}).status_code, 200)
         self.assertEqual(provider.calls, [("retirement", 1)])
+
+    def test_discovery_result_is_structured_and_labels_statuses(self) -> None:
+        provider = DiscoveryFake()
+        response = TestClient(create_app(repository=self.repository, discovery_provider=provider)).post("/discovery", data={"keyword": "retirement", "limit": "20"})
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("DiscoveryReport(", response.text)
+        for label in ("Search results", "Unique channels", "Duplicate results in search", "New channels", "Existing channels", "New discovery relationships", "Existing discovery relations"):
+            self.assertIn(label, response.text)
+        self.assertIn("Two", response.text)
+        self.assertIn("/channels/UC2", response.text)
+        self.assertIn("https://youtube.com/channel/UC2", response.text)
+        self.assertIn("target=\"_blank\"", response.text)
+        self.assertIn("New", response.text)
+        self.assertIn("Existing", response.text)
+
+    def test_empty_discovery_result_is_friendly(self) -> None:
+        response = TestClient(create_app(repository=self.repository, discovery_provider=EmptyDiscoveryFake())).post("/discovery", data={"keyword": "unknown", "limit": "20"})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("No channels found for this keyword.", response.text)
+        self.assertNotIn("DiscoveryReport(", response.text)
+
+    def test_discovery_dry_run_notice_and_discovered_status(self) -> None:
+        response = TestClient(create_app(repository=self.repository, discovery_provider=DiscoveryFake())).post("/discovery", data={"keyword": "retirement", "limit": "20", "dry_run": "true"})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Dry run — nothing was written to the database.", response.text)
+        self.assertIn("Discovered", response.text)
 
     def test_channel_crawl_post_calls_fake_provider(self) -> None:
         provider = VideoFake(Video("v3", "UC1", "New video", datetime.now(timezone.utc)))

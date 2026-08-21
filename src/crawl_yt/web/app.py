@@ -83,7 +83,15 @@ def create_app(
             raise HTTPException(400, "Keyword and limit 1-1000 are required")
         provider = discovery_provider or YtDlpDiscoveryProvider()
         report = DiscoveryService(provider, database).discover(keyword.strip(), limit, dry_run=dry_run)
-        return render(request, "result.html", title="Discovery result", result=report)
+        return render(
+            request,
+            "discovery_result.html",
+            title="Discovery result",
+            report=report,
+            channels=report.channels,
+            new_channel_ids=set(report.new_channel_ids),
+            dry_run=dry_run,
+        )
 
     @app.get("/channels", response_class=HTMLResponse)
     def channels(request: Request, page: int = 1, per_page: int = 50, search: str | None = None, tier: str | None = None, keyword: str | None = None) -> HTMLResponse:
