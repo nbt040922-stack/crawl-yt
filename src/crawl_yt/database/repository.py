@@ -465,6 +465,23 @@ class ChannelRepository:
     def count_channels(self) -> int:
         return self._count("channels")
 
+    def count_channels_due_for_crawl(self, now: datetime | None = None) -> int:
+        current = self._timestamp(now or datetime.now(timezone.utc))
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT COUNT(*) FROM channel_crawl_state
+                   WHERE next_crawl_at IS NOT NULL AND next_crawl_at <= ?""",
+                (current,),
+            ).fetchone()
+        return int(row[0])
+
+    def count_failing_channels(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM channel_crawl_state WHERE consecutive_failures > 0"
+            ).fetchone()
+        return int(row[0])
+
     def count_discovery_relationships(self) -> int:
         return self._count("channel_discoveries")
 
@@ -1537,6 +1554,20 @@ class VideoRepository(ChannelRepository):
         with self._connect() as connection:
             row = connection.execute("SELECT COUNT(*) FROM videos").fetchone()
         return int(row[0])
+
+    def count_video_score_tiers(self) -> dict[str, int]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT COALESCE(tier, 'unscored'), COUNT(*) FROM video_scores GROUP BY tier"
+            ).fetchall()
+            total = connection.execute("SELECT COUNT(*) FROM videos").fetchone()[0]
+        counts = {"high": 0, "medium": 0, "low": 0, "unscored": int(total)}
+        for tier, count in rows:
+            tier_name = str(tier)
+            counts[tier_name] = int(count)
+            if tier_name != "unscored":
+                counts["unscored"] -= int(count)
+        return counts
 
     def list_videos_page(
         self, limit: int, offset: int = 0, channel_id: str | None = None,

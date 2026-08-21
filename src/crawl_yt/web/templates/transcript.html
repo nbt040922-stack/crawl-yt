@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Transcript</h1>
+<p><a href="/videos/{{ video_id }}">Back to video</a></p>
+<dl><dt>Language</dt><dd>{{ transcript.language }}</dd><dt>Source</dt><dd>{{ transcript.source }}</dd><dt>Created</dt><dd>{{ transcript.created_at or '—' }}</dd><dt>Updated</dt><dd>{{ transcript.updated_at or '—' }}</dd></dl>
+<h2>Timestamped transcript</h2>
+{% for segment in segments %}<p><strong>{{ segment.timestamp }}</strong><br>{{ segment.text }}</p>{% endfor %}
+<h2>Full text</h2><pre>{{ transcript.text }}</pre>
+{% endblock %}

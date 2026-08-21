@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -26,10 +25,6 @@ from ..transcripts.ytdlp_provider import YtDlpTranscriptProvider
 
 ROOT = Path(__file__).parent
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
-
-
-def _page(request: Request, **values: Any) -> dict[str, Any]:
-    return {"request": request, **values}
 
 
 def create_app(
@@ -66,15 +61,15 @@ def create_app(
             "videos": database.count_videos(),
             "metadata_enriched": database.count_enriched_videos(),
             "metadata_pending": database.count_videos_needing_enrichment(),
-            "transcripts": _count_transcripts(database),
-            "with_transcript": _count_videos_with_transcripts(database),
-            "without_transcript": database.count_videos() - _count_videos_with_transcripts(database),
+            "transcripts": database.count_transcripts(),
+            "with_transcript": database.count_videos_with_transcripts(),
+            "without_transcript": database.count_videos_without_transcripts(),
             "discovery_relationships": database.count_discovery_relationships(),
             "channel_tiers": database.count_channels_by_score_tier(),
-            "video_tiers": _video_tiers(database),
+            "video_tiers": database.count_video_score_tiers(),
             "work_plans": database.work_plan_status_counts(),
-            "crawl_due": len(database.list_channels_due_for_crawl(100000)),
-            "failing": _failing_channels(database),
+            "crawl_due": database.count_channels_due_for_crawl(),
+            "failing": database.count_failing_channels(),
         }
         return render(request, "dashboard.html", title="Dashboard", stats=stats)
 
@@ -117,12 +112,16 @@ def create_app(
 
     @app.post("/channels/{channel_id}/crawl")
     def channel_crawl(channel_id: str, full: bool = Form(False)) -> RedirectResponse:
+        if database.get_channel(channel_id) is None:
+            raise HTTPException(404, "Channel not found")
         service = ChannelCrawlService(video_provider or YtDlpChannelVideoProvider(), database)
         service.crawl(channel_id, full=full)
         return RedirectResponse(f"/channels/{channel_id}", status_code=303)
 
     @app.post("/channels/{channel_id}/crawl-full")
     def channel_crawl_full(channel_id: str, confirm: bool = Form(False)) -> RedirectResponse:
+        if database.get_channel(channel_id) is None:
+            raise HTTPException(404, "Channel not found")
         if not confirm:
             raise HTTPException(400, "Full crawl requires explicit confirmation")
         service = ChannelCrawlService(video_provider or YtDlpChannelVideoProvider(), database)
@@ -142,22 +141,37 @@ def create_app(
         video = database.get_video(video_id)
         if video is None:
             raise HTTPException(404, "Video not found")
-        transcripts = database.list_transcripts_for_video(video_id) if hasattr(database, "list_transcripts_for_video") else []
+        transcripts = database.list_transcripts_for_video(video_id)
         return render(request, "detail.html", title=video.title, kind="video", video=video,
                       score=database.get_video_score(video_id), transcripts=transcripts)
 
+    @app.get("/videos/{video_id}/transcripts/{language}/{source}", response_class=HTMLResponse)
+    def transcript_detail(request: Request, video_id: str, language: str, source: str) -> HTMLResponse:
+        if database.get_video(video_id) is None:
+            raise HTTPException(404, "Video not found")
+        transcript = database.get_transcript(video_id, language, source)
+        if transcript is None:
+            raise HTTPException(404, "Transcript not found")
+        return render(request, "transcript.html", title=f"Transcript · {video_id}", video_id=video_id, transcript=transcript, segments=_format_segments(transcript.segments))
+
     @app.post("/videos/{video_id}/score")
     def video_score(video_id: str) -> RedirectResponse:
+        if database.get_video(video_id) is None:
+            raise HTTPException(404, "Video not found")
         VideoScoringService(database).score_video(video_id)
         return RedirectResponse(f"/videos/{video_id}", status_code=303)
 
     @app.post("/videos/{video_id}/enrich")
     def video_enrich(video_id: str) -> RedirectResponse:
+        if database.get_video(video_id) is None:
+            raise HTTPException(404, "Video not found")
         VideoMetadataService(metadata_provider or YtDlpVideoMetadataProvider(), database).enrich(video_id)
         return RedirectResponse(f"/videos/{video_id}", status_code=303)
 
     @app.post("/videos/{video_id}/transcript")
     def video_transcript(video_id: str, language: str | None = Form(None)) -> RedirectResponse:
+        if database.get_video(video_id) is None:
+            raise HTTPException(404, "Video not found")
         TranscriptService(transcript_provider or YtDlpTranscriptProvider(), database).transcript(video_id, language)
         return RedirectResponse(f"/videos/{video_id}", status_code=303)
 
@@ -188,6 +202,8 @@ def create_app(
 
     @app.post("/work-plans/{plan_id}/execute")
     def execute_work_plan(request: Request, plan_id: int, max_items: int | None = Form(None), retry_failed: bool = Form(False)) -> RedirectResponse:
+        if database.get_work_plan(plan_id) is None:
+            raise HTTPException(404, "Work plan not found")
         if max_items is None or max_items < 1:
             raise HTTPException(400, "max_items must be explicit and positive")
         from ..collectors.channel_collector import ChannelCrawlService
@@ -200,29 +216,16 @@ def create_app(
     return app
 
 
-def _video_tiers(database: VideoRepository) -> dict[str, int]:
-    with database._connect() as connection:
-        rows = connection.execute("SELECT COALESCE(tier, 'unscored'), COUNT(*) FROM video_scores GROUP BY tier").fetchall()
-        total = connection.execute("SELECT COUNT(*) FROM videos").fetchone()[0]
-    counts = {"high": 0, "medium": 0, "low": 0, "unscored": int(total)}
-    for tier, count in rows:
-        counts[str(tier)] = int(count)
-        if str(tier) != "unscored":
-            counts["unscored"] -= int(count)
-    return counts
-
-
-def _failing_channels(database: VideoRepository) -> int:
-    with database._connect() as connection:
-        row = connection.execute("SELECT COUNT(*) FROM channel_crawl_state WHERE consecutive_failures > 0").fetchone()
-    return int(row[0])
-
-
-def _count_transcripts(database: VideoRepository) -> int:
-    with database._connect() as connection:
-        return int(connection.execute("SELECT COUNT(*) FROM transcripts").fetchone()[0])
-
-
-def _count_videos_with_transcripts(database: VideoRepository) -> int:
-    with database._connect() as connection:
-        return int(connection.execute("SELECT COUNT(DISTINCT video_id) FROM transcripts").fetchone()[0])
+def _format_segments(segments: list[dict[str, Any]]) -> list[dict[str, str]]:
+    formatted: list[dict[str, str]] = []
+    for segment in segments:
+        try:
+            seconds = float(segment.get("start", segment.get("start_time", 0)))
+        except (TypeError, ValueError):
+            seconds = 0.0
+        total_millis = max(0, int(round(seconds * 1000)))
+        hours, remainder = divmod(total_millis, 3_600_000)
+        minutes, remainder = divmod(remainder, 60_000)
+        secs, millis = divmod(remainder, 1000)
+        formatted.append({"timestamp": f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}", "text": str(segment.get("text", ""))})
+    return formatted

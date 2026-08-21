@@ -4,21 +4,65 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from src.crawl_yt.database.models import Channel, Video
-from src.crawl_yt.database.repository import VideoRepository
+from src.crawl_yt.collectors.video_metadata import VideoMetadata
+from src.crawl_yt.database.models import Channel, Transcript, Video
+from src.crawl_yt.database.repository import TranscriptRepository
+from src.crawl_yt.discovery.channel_discovery import DiscoveryBatch
+from src.crawl_yt.transcripts.provider import TranscriptData
 from src.crawl_yt.web.app import create_app
+
+
+class DiscoveryFake:
+    def __init__(self):
+        self.calls = []
+
+    def search(self, keyword, limit):
+        self.calls.append((keyword, limit))
+        return DiscoveryBatch(1, [Channel("UC2", "Two")], "fake")
+
+
+class VideoFake:
+    def __init__(self, video=None):
+        self.calls = []
+        self.video = video
+
+    def iterate_videos(self, channel_id, limit=None):
+        self.calls.append((channel_id, limit))
+        return [self.video] if self.video else []
+
+
+class MetadataFake:
+    def __init__(self):
+        self.calls = []
+
+    def fetch(self, video_id, webpage_url=None):
+        self.calls.append((video_id, webpage_url))
+        return VideoMetadata(video_id, "fake", title="Enriched title", view_count=42)
+
+
+class TranscriptFake:
+    def __init__(self):
+        self.calls = []
+
+    def fetch(self, video_id, webpage_url, preferred_languages):
+        self.calls.append((video_id, webpage_url, preferred_languages))
+        return TranscriptData(video_id, "en", "fake", "Fetched text", [{"start": 1.2, "text": "Fetched text"}])
 
 
 class WebTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
-        self.repository = VideoRepository(Path(self.temp.name) / "web.db")
+        self.repository = TranscriptRepository(Path(self.temp.name) / "web.db")
         self.repository.upsert_channel(Channel("UC1", "One", subscriber_count=10))
-        self.repository.upsert_video(Video("v1", "UC1", "Video one", __import__("datetime").datetime.now(__import__("datetime").timezone.utc)))
+        now = datetime.now(timezone.utc)
+        self.repository.upsert_video(Video("v1", "UC1", "Video one", now))
+        self.repository.upsert_video(Video("v2", "UC1", "Video two", now))
+        self.repository.upsert_transcript(Transcript("v1", "en", "youtube_auto", "Police arrived.", [{"start": 12.4, "text": "Police arrived."}], now, now))
         self.client = TestClient(create_app(repository=self.repository))
 
     def tearDown(self) -> None:
@@ -77,6 +121,82 @@ class WebTests(unittest.TestCase):
     def test_full_crawl_requires_confirmation(self) -> None:
         response = self.client.post("/channels/UC1/crawl-full", data={})
         self.assertEqual(response.status_code, 400)
+
+    def test_transcript_detail_renders_timestamped_segments(self) -> None:
+        response = self.client.get("/videos/v1/transcripts/en/youtube_auto")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("00:00:12.400", response.text)
+        self.assertIn("Police arrived.", response.text)
+        self.assertIn("youtube_auto", response.text)
+
+    def test_missing_transcript_detail_is_404(self) -> None:
+        self.assertEqual(self.client.get("/videos/v1/transcripts/fr/youtube_auto").status_code, 404)
+        self.assertEqual(self.client.get("/videos/missing/transcripts/en/youtube_auto").status_code, 404)
+
+    def test_dashboard_uses_count_methods_not_due_materialization(self) -> None:
+        self.repository.list_channels_due_for_crawl = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("materialized due rows"))
+        self.assertEqual(self.client.get("/").status_code, 200)
+
+    def test_web_source_does_not_use_private_connect(self) -> None:
+        import inspect
+        from src.crawl_yt.web import app as web_app
+        self.assertNotIn("._connect(", inspect.getsource(web_app))
+
+    def test_discovery_get_has_no_provider_call_and_post_calls_fake(self) -> None:
+        provider = DiscoveryFake()
+        app_client = TestClient(create_app(repository=self.repository, discovery_provider=provider))
+        self.assertEqual(app_client.get("/discovery").status_code, 200)
+        self.assertEqual(provider.calls, [])
+        self.assertEqual(app_client.post("/discovery", data={"keyword": "retirement", "limit": "1"}).status_code, 200)
+        self.assertEqual(provider.calls, [("retirement", 1)])
+
+    def test_channel_crawl_post_calls_fake_provider(self) -> None:
+        provider = VideoFake(Video("v3", "UC1", "New video", datetime.now(timezone.utc)))
+        app_client = TestClient(create_app(repository=self.repository, video_provider=provider))
+        response = app_client.post("/channels/UC1/crawl", data={}, follow_redirects=False)
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(provider.calls, [("UC1", None)])
+
+    def test_video_actions_call_fake_services(self) -> None:
+        metadata = MetadataFake()
+        transcript = TranscriptFake()
+        app_client = TestClient(create_app(repository=self.repository, metadata_provider=metadata, transcript_provider=transcript))
+        self.assertEqual(app_client.post("/videos/v1/score", follow_redirects=False).status_code, 303)
+        self.assertEqual(app_client.post("/videos/v2/enrich", follow_redirects=False).status_code, 303)
+        self.assertEqual(app_client.post("/videos/v2/transcript", data={"language": "en"}, follow_redirects=False).status_code, 303)
+        self.assertEqual(metadata.calls[0][0], "v2")
+        self.assertEqual(transcript.calls[0][2], ("en",))
+
+    def test_unknown_action_targets_are_404(self) -> None:
+        self.assertEqual(self.client.post("/channels/missing/crawl", data={}).status_code, 404)
+        self.assertEqual(self.client.post("/videos/missing/score").status_code, 404)
+        self.assertEqual(self.client.post("/videos/missing/enrich").status_code, 404)
+        self.assertEqual(self.client.post("/videos/missing/transcript", data={}).status_code, 404)
+        self.assertEqual(self.client.get("/work-plans/999999").status_code, 404)
+        self.assertEqual(self.client.post("/work-plans/999999/execute", data={"max_items": "1"}).status_code, 404)
+
+    def test_provider_failure_is_friendly_html(self) -> None:
+        class FailingVideoProvider:
+            def iterate_videos(self, channel_id, limit=None):
+                raise RuntimeError("provider unavailable")
+        response = TestClient(create_app(repository=self.repository, video_provider=FailingVideoProvider()), raise_server_exceptions=False).post("/channels/UC1/crawl", data={})
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("Operation failed", response.text)
+
+    def test_transcript_action_is_caption_only(self) -> None:
+        transcript = TranscriptFake()
+        self.assertEqual(TestClient(create_app(repository=self.repository, transcript_provider=transcript)).post("/videos/v2/transcript", data={}, follow_redirects=False).status_code, 303)
+        self.assertEqual(transcript.calls[0][2], ("en", "en-US", "en-GB"))
+
+    def test_work_plan_execution_uses_mocked_provider(self) -> None:
+        metadata = MetadataFake()
+        app_client = TestClient(create_app(repository=self.repository, metadata_provider=metadata))
+        created = app_client.post("/work-plans", data={"max_crawls": "0", "max_enrichments": "1", "max_transcripts": "0"}, follow_redirects=False)
+        self.assertEqual(created.status_code, 303)
+        plan_id = created.headers["location"].rsplit("/", 1)[-1]
+        executed = app_client.post(f"/work-plans/{plan_id}/execute", data={"max_items": "1"}, follow_redirects=False)
+        self.assertEqual(executed.status_code, 303)
+        self.assertTrue(metadata.calls)
 
 
 if __name__ == "__main__":
