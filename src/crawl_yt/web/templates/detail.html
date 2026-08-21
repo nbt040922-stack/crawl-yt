@@ -2,7 +2,7 @@
 {% block content %}
 {% if kind == 'channel' %}
 <h1>{{ channel.title }}</h1><p>ID: {{ channel.channel_id }} · Subscribers: {{ channel.subscriber_count or '—' }}</p><p>{{ channel.description or '' }}</p>
-<h2>Score</h2><pre>{{ score }}</pre><h2>Discovery provenance</h2><ul>{% for item in discoveries %}<li>{{ item.keyword }} · {{ item.source }}</li>{% endfor %}</ul><h2>Crawl state</h2><pre>{{ state }}</pre>
+<h2>Score</h2><pre>{{ score }}</pre><h2>Discovery provenance</h2>{% if discoveries %}<ul>{% for item in discoveries %}<li><a href="/discovery/keywords/{{ quote(item.keyword|trim, safe='') }}">{{ item.keyword|trim }}</a> · {{ item.source }} · {{ item.discovered_at }}</li>{% endfor %}</ul>{% else %}<p class="notice">No discovery provenance recorded.</p>{% endif %}<h2>Crawl state</h2><pre>{{ state }}</pre>
 <h2>Videos</h2><ul>{% for video in videos %}<li><a href="/videos/{{ video.video_id }}">{{ video.title }}</a></li>{% endfor %}</ul>
 <form method="post" action="/channels/{{ channel.channel_id }}/score"><button>Score Channel</button></form>
 <form method="post" action="/channels/{{ channel.channel_id }}/crawl"><button class="danger">Crawl Incremental (contacts YouTube)</button></form>

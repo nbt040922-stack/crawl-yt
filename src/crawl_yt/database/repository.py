@@ -394,7 +394,7 @@ class ChannelRepository:
             clauses.append("COALESCE(cs.tier, 'unscored') = ?")
             parameters.append(tier)
         if keyword:
-            clauses.append("EXISTS (SELECT 1 FROM channel_discoveries cd WHERE cd.channel_id = c.channel_id AND cd.keyword = ?)")
+            clauses.append("EXISTS (SELECT 1 FROM channel_discoveries cd WHERE cd.channel_id = c.channel_id AND lower(trim(cd.keyword)) = lower(trim(?)))")
             parameters.append(keyword)
         parameters.extend((limit, offset))
         with self._connect() as connection:
@@ -402,7 +402,9 @@ class ChannelRepository:
                 f"""
                 SELECT c.*, cs.score AS score, cs.tier AS tier,
                        s.last_success_at, s.next_crawl_at, s.consecutive_failures,
-                       (SELECT COUNT(*) FROM videos v WHERE v.channel_id = c.channel_id) AS observed_videos
+                       (SELECT COUNT(*) FROM videos v WHERE v.channel_id = c.channel_id) AS observed_videos,
+                       (SELECT GROUP_CONCAT(DISTINCT cd.keyword) FROM channel_discoveries cd
+                        WHERE cd.channel_id = c.channel_id) AS discovery_keywords
                 FROM channels c
                 LEFT JOIN channel_scores cs ON cs.channel_id = c.channel_id
                 LEFT JOIN channel_crawl_state s ON s.channel_id = c.channel_id
@@ -427,7 +429,7 @@ class ChannelRepository:
             clauses.append("COALESCE(cs.tier, 'unscored') = ?")
             parameters.append(tier)
         if keyword:
-            clauses.append("EXISTS (SELECT 1 FROM channel_discoveries cd WHERE cd.channel_id = c.channel_id AND cd.keyword = ?)")
+            clauses.append("EXISTS (SELECT 1 FROM channel_discoveries cd WHERE cd.channel_id = c.channel_id AND lower(trim(cd.keyword)) = lower(trim(?)))")
             parameters.append(keyword)
         with self._connect() as connection:
             row = connection.execute(
@@ -507,6 +509,81 @@ class ChannelRepository:
                 """
             ).fetchall()
         return [(str(row[0]), int(row[1])) for row in rows]
+
+    @staticmethod
+    def _normalize_discovery_keyword(keyword: str) -> str:
+        return " ".join(keyword.split()).casefold()
+
+    def list_discovery_keyword_summaries(self) -> list[dict[str, object]]:
+        """Return normalized keyword provenance summaries for the history UI."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT keyword, channel_id, discovered_at
+                   FROM channel_discoveries ORDER BY discovered_at DESC, keyword"""
+            ).fetchall()
+        grouped: dict[str, dict[str, object]] = {}
+        for row in rows:
+            normalized = self._normalize_discovery_keyword(str(row["keyword"]))
+            item = grouped.setdefault(
+                normalized,
+                {"keyword": normalized, "channel_ids": set(), "first_discovered": row["discovered_at"], "last_discovered": row["discovered_at"]},
+            )
+            item["channel_ids"].add(str(row["channel_id"]))
+            timestamp = row["discovered_at"]
+            if timestamp and (not item["first_discovered"] or timestamp < item["first_discovered"]):
+                item["first_discovered"] = timestamp
+            if timestamp and (not item["last_discovered"] or timestamp > item["last_discovered"]):
+                item["last_discovered"] = timestamp
+        summaries = []
+        for item in grouped.values():
+            summaries.append({"keyword": item["keyword"], "channel_count": len(item["channel_ids"]), "first_discovered": item["first_discovered"], "last_discovered": item["last_discovered"]})
+        return sorted(summaries, key=lambda item: (item["last_discovered"] is None, item["last_discovered"] or "", item["keyword"]))[::-1]
+
+    def list_discovery_keywords(self) -> list[str]:
+        return [str(item["keyword"]) for item in self.list_discovery_keyword_summaries()]
+
+    def list_channels_for_discovery_keyword(self, keyword: str, limit: int, offset: int = 0) -> list[dict[str, object]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT c.*, cs.score, cs.tier,
+                    (SELECT COUNT(*) FROM videos v WHERE v.channel_id = c.channel_id) AS observed_videos,
+                    MIN(cd.discovered_at) AS first_discovered, MAX(cd.discovered_at) AS last_discovered,
+                    (SELECT GROUP_CONCAT(DISTINCT other.keyword) FROM channel_discoveries other
+                     WHERE other.channel_id = c.channel_id
+                       AND lower(trim(other.keyword)) <> lower(trim(?))) AS other_keywords
+                   FROM channels c
+                   JOIN channel_discoveries cd ON cd.channel_id = c.channel_id
+                   LEFT JOIN channel_scores cs ON cs.channel_id = c.channel_id
+                   WHERE lower(trim(cd.keyword)) = lower(trim(?))
+                   GROUP BY c.channel_id
+                   ORDER BY cs.score IS NULL, cs.score DESC, c.channel_id
+                   LIMIT ? OFFSET ?""",
+                (keyword, keyword, limit, offset),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def count_channels_for_discovery_keyword(self, keyword: str) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT COUNT(DISTINCT channel_id) FROM channel_discoveries
+                   WHERE lower(trim(keyword)) = lower(trim(?))""",
+                (keyword,),
+            ).fetchone()
+        return int(row[0])
+
+    def get_discovery_keywords_for_channels(self, channel_ids: list[str]) -> dict[str, list[str]]:
+        if not channel_ids:
+            return {}
+        placeholders = ",".join("?" for _ in channel_ids)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT channel_id, keyword FROM channel_discoveries WHERE channel_id IN ({placeholders}) ORDER BY channel_id, keyword",
+                channel_ids,
+            ).fetchall()
+        result = {channel_id: [] for channel_id in channel_ids}
+        for row in rows:
+            result[str(row["channel_id"])].append(str(row["keyword"]))
+        return result
 
     def list_channel_ids_for_keyword(self, keyword: str) -> list[str]:
         with self._connect() as connection:

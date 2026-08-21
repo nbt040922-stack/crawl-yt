@@ -209,3 +209,17 @@ segments duoc luu rong thay vi tao timestamp gia.
 ```powershell
 python main.py add-channel <youtube_channel_url>
 ```
+
+## Web Dashboard
+
+Chạy dashboard local bằng:
+
+```powershell
+python main.py web
+```
+
+Discovery dùng để tìm channel mới theo keyword. Discovery History lưu và hiển
+thị quan hệ keyword → channel đã được ghi trong database, nên có thể mở lại
+toàn bộ channel của từng keyword. Channels là thư viện channel chung; một
+channel có thể thuộc nhiều discovery keyword và trang channel hiển thị các
+keyword provenance tương ứng.

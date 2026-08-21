@@ -29,5 +29,5 @@
   {% endfor %}</tbody>
 </table></div>
 {% endif %}
-<a href="/channels">View all channels</a>
+<p><a href="/discovery/keywords/{{ quote(keyword, safe='') }}">View channels for “{{ keyword }}”</a> · <a href="/channels">View all channels</a></p>
 {% endblock %}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -25,6 +26,7 @@ from ..transcripts.ytdlp_provider import YtDlpTranscriptProvider
 
 ROOT = Path(__file__).parent
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
+templates.env.globals["quote"] = quote
 
 
 def create_app(
@@ -75,7 +77,7 @@ def create_app(
 
     @app.get("/discovery", response_class=HTMLResponse)
     def discovery_page(request: Request) -> HTMLResponse:
-        return render(request, "form.html", title="Discovery", form="discovery")
+        return render(request, "form.html", title="Discovery", form="discovery", history=database.list_discovery_keyword_summaries())
 
     @app.post("/discovery", response_class=HTMLResponse)
     def discovery_action(request: Request, keyword: str = Form(...), limit: int = Form(...), dry_run: bool = Form(False)) -> HTMLResponse:
@@ -91,7 +93,16 @@ def create_app(
             channels=report.channels,
             new_channel_ids=set(report.new_channel_ids),
             dry_run=dry_run,
+            keyword=keyword.strip(),
         )
+
+    @app.get("/discovery/keywords/{keyword}", response_class=HTMLResponse)
+    def discovery_keyword_detail(request: Request, keyword: str, page: int = 1, per_page: int = 50) -> HTMLResponse:
+        page = max(page, 1)
+        per_page = per_page if per_page in {25, 50, 100} else 50
+        rows = database.list_channels_for_discovery_keyword(keyword, per_page, (page - 1) * per_page)
+        total = database.count_channels_for_discovery_keyword(keyword)
+        return render(request, "discovery_keyword.html", title=f"Discovery: {keyword}", keyword=keyword, rows=rows, page=page, per_page=per_page, total=total)
 
     @app.get("/channels", response_class=HTMLResponse)
     def channels(request: Request, page: int = 1, per_page: int = 50, search: str | None = None, tier: str | None = None, keyword: str | None = None) -> HTMLResponse:
@@ -99,7 +110,7 @@ def create_app(
         page = max(page, 1)
         total = database.count_channels_page(search, tier, keyword)
         rows = database.list_channels_page(per_page, (page - 1) * per_page, search, tier, keyword)
-        return render(request, "list.html", title="Channels", page_kind="channels", rows=rows, page=page, per_page=per_page, total=total)
+        return render(request, "list.html", title="Channels", page_kind="channels", rows=rows, page=page, per_page=per_page, total=total, search=search, keyword=keyword, keyword_options=database.list_discovery_keywords())
 
     @app.get("/channels/{channel_id}", response_class=HTMLResponse)
     def channel_detail(request: Request, channel_id: str) -> HTMLResponse:

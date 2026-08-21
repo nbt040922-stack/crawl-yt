@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Discovery: {{ keyword }}</h1>
+<p><strong>Total channels:</strong> {{ total }}</p>
+{% if rows %}<div class="table-wrap"><table><thead><tr><th>Channel</th><th>Score</th><th>Tier</th><th>Subscribers</th><th>Videos</th><th>First discovered</th><th>Last discovered</th><th>Other keywords</th><th>YouTube</th><th>Details</th></tr></thead><tbody>{% for row in rows %}<tr><td>{{ row.title }}</td><td>{{ row.score or '—' }}</td><td>{{ row.tier or 'unscored' }}</td><td>{{ row.subscriber_count or '—' }}</td><td>{{ row.observed_videos }}</td><td>{{ row.first_discovered or '—' }}</td><td>{{ row.last_discovered or '—' }}</td><td>{{ row.other_keywords or '—' }}</td><td><a href="{{ row.channel_url or 'https://www.youtube.com/channel/' ~ row.channel_id }}" target="_blank" rel="noopener noreferrer">Open</a></td><td><a href="/channels/{{ row.channel_id }}">View details</a></td></tr>{% endfor %}</tbody></table></div>{% else %}<p class="notice">No channels are currently associated with this keyword.</p>{% endif %}
+<p>Page {{ page }} · {{ total }} total</p>
+{% endblock %}

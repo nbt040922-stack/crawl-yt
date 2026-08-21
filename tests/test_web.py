@@ -23,7 +23,7 @@ class DiscoveryFake:
 
     def search(self, keyword, limit):
         self.calls.append((keyword, limit))
-        return DiscoveryBatch(2, [Channel("UC1", "One", channel_url="https://youtube.com/channel/UC1"), Channel("UC2", "Two", channel_url="https://youtube.com/channel/UC2")], "fake")
+        return DiscoveryBatch(2, [Channel("UC1", "One", channel_url="https://youtube.com/channel/UC1"), Channel("UC3", "Two", channel_url="https://youtube.com/channel/UC3")], "fake")
 
 
 class EmptyDiscoveryFake:
@@ -64,7 +64,11 @@ class WebTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.repository = TranscriptRepository(Path(self.temp.name) / "web.db")
         self.repository.upsert_channel(Channel("UC1", "One", subscriber_count=10))
+        self.repository.upsert_channel(Channel("UC2", "Two", subscriber_count=20))
         now = datetime.now(timezone.utc)
+        self.repository.record_discovery("UC1", "retirement", "seed", now.replace(hour=8))
+        self.repository.record_discovery("UC1", " social security ", "seed", now.replace(hour=9))
+        self.repository.record_discovery("UC2", "RETIREMENT", "seed", now.replace(hour=10))
         self.repository.upsert_video(Video("v1", "UC1", "Video one", now))
         self.repository.upsert_video(Video("v2", "UC1", "Video two", now))
         self.repository.upsert_transcript(Transcript("v1", "en", "youtube_auto", "Police arrived.", [{"start": 12.4, "text": "Police arrived."}], now, now))
@@ -163,8 +167,8 @@ class WebTests(unittest.TestCase):
         for label in ("Search results", "Unique channels", "Duplicate results in search", "New channels", "Existing channels", "New discovery relationships", "Existing discovery relations"):
             self.assertIn(label, response.text)
         self.assertIn("Two", response.text)
-        self.assertIn("/channels/UC2", response.text)
-        self.assertIn("https://youtube.com/channel/UC2", response.text)
+        self.assertIn("/channels/UC3", response.text)
+        self.assertIn("https://youtube.com/channel/UC3", response.text)
         self.assertIn("target=\"_blank\"", response.text)
         self.assertIn("New", response.text)
         self.assertIn("Existing", response.text)
@@ -180,6 +184,49 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("Dry run — nothing was written to the database.", response.text)
         self.assertIn("Discovered", response.text)
+
+    def test_discovery_history_shows_keyword_counts_and_links(self) -> None:
+        response = self.client.get("/discovery")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Discovery History", response.text)
+        self.assertIn("retirement", response.text)
+        self.assertIn("/discovery/keywords/retirement", response.text)
+        self.assertIn(">2<", response.text)
+
+    def test_keyword_detail_is_paginated_and_associated_only(self) -> None:
+        response = self.client.get("/discovery/keywords/retirement?page=1&per_page=1")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Discovery: retirement", response.text)
+        self.assertIn("Total channels", response.text)
+        self.assertIn("One", response.text)
+        self.assertIn("Page 1", response.text)
+        self.assertIn("2 total", response.text)
+
+    def test_keyword_detail_shows_other_keywords_and_unicode(self) -> None:
+        response = self.client.get("/discovery/keywords/social%20security")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("One", response.text)
+        self.assertIn("retirement", response.text)
+
+    def test_channels_keyword_filter_and_provenance(self) -> None:
+        response = self.client.get("/channels?keyword=retirement")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Discovery keywords", response.text)
+        self.assertIn("One", response.text)
+        self.assertIn("Two", response.text)
+        self.assertIn("retirement", response.text)
+
+    def test_channel_detail_links_provenance(self) -> None:
+        response = self.client.get("/channels/UC1")
+        self.assertIn("/discovery/keywords/retirement", response.text)
+        self.assertIn("/discovery/keywords/social%20security", response.text)
+
+    def test_empty_discovery_history_and_keyword_states(self) -> None:
+        empty_repo = TranscriptRepository(Path(self.temp.name) / "empty.db")
+        empty_repo.upsert_channel(Channel("UC9", "No provenance"))
+        empty_client = TestClient(create_app(repository=empty_repo))
+        self.assertIn("No discovery searches have been saved yet.", empty_client.get("/discovery").text)
+        self.assertIn("No channels are currently associated with this keyword.", empty_client.get("/discovery/keywords/unknown").text)
 
     def test_channel_crawl_post_calls_fake_provider(self) -> None:
         provider = VideoFake(Video("v3", "UC1", "New video", datetime.now(timezone.utc)))
