@@ -16,6 +16,7 @@ from src.crawl_yt.database.models import (
     OperationalBudget,
     Transcript,
     Video,
+    VideoScore,
     WorkItem,
     WorkPlan,
 )
@@ -133,6 +134,18 @@ class OperationalPlannerTests(unittest.TestCase):
         items = {item.target_id: item for item in self.repository.list_work_items(plan.id)}
         self.assertGreater(items["high-recent"].priority, items["high-old"].priority)
         self.assertGreater(items["high-recent"].priority, items["low-recent"].priority)
+
+    def test_planner_uses_persisted_video_score_priority(self) -> None:
+        self.channel("UC1", 50, "medium")
+        self.video("first", "UC1", 10)
+        self.video("second", "UC1", 10)
+        for video_id, priority in (("first", 20.0), ("second", 95.0)):
+            self.repository.upsert_video_score(
+                VideoScore(video_id, priority, 50, 50, 50, priority, priority, 80, "high", "{}", NOW, "v1")
+            )
+        plan = self.planner.plan(self.budget(enrichments=2), now=NOW)
+        items = self.repository.list_work_items(plan.id)
+        self.assertEqual([item.target_id for item in items], ["second", "first"])
 
     def test_enriched_video_gets_transcript_bonus(self) -> None:
         self.channel("UC1", 50, "medium")

@@ -33,6 +33,9 @@ python main.py expand "retirement" --max-depth 2 --channel-budget 500 --query-bu
 python main.py expand "retirement" --max-depth 2 --channel-budget 500 --query-budget 30 --dry-run
 python main.py discovery-runs --limit 20
 python main.py discovery-run 1
+python main.py score-video VIDEO_ID
+python main.py score-videos --limit 100
+python main.py top-videos --limit 20
 python main.py plan-work --max-crawls 50 --max-enrichments 100 --max-transcripts 100
 python main.py work-plans --limit 20
 python main.py work-plan 1
@@ -119,6 +122,15 @@ work item cua Phase 2D.
 chi dung caption re cho transcript. Completed item khong chay lai; failed item
 chi duoc thu lai khi co `--retry-failed`. Phase 2D khong thuc thi
 `discovery_expand` trong saved plan va khong bao gio tu bat audio ASR.
+
+Phase 2E cham diem video bang du lieu local voi scoring version `v1`. Metadata
+priority = 40% recency + 30% channel + 15% traction + 15% confidence.
+Transcript priority = 30% recency + 30% channel + 20% traction + 10% metadata
+value + 10% confidence; operational score la max cua hai priority, clamp 0-100.
+Score cu hon 24 gio se duoc tinh lai. Planner chi cham
+diem pool gioi han (mac dinh 5x budget) roi chon top theo tung loai cong viec.
+`score-videos` bat buoc co `--limit`; scoring khong goi YouTube va khong lay
+transcript.
 
 Priority crawl = tier base (high 300, medium 200, unscored 150, low 100) + so
 ngay overdue toi da 50 - 20 moi failure lien tiep. Video priority = channel

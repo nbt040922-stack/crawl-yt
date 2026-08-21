@@ -143,6 +143,22 @@ class Video:
 
 
 @dataclass(slots=True)
+class VideoScore:
+    video_id: str
+    score: float
+    recency_score: float
+    channel_score: float
+    traction_score: float
+    metadata_value_score: float
+    transcript_value_score: float
+    confidence_score: float
+    tier: str
+    reason_json: str
+    scored_at: datetime
+    scoring_version: str
+
+
+@dataclass(slots=True)
 class Transcript:
     video_id: str
     language: str

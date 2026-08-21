@@ -34,6 +34,7 @@ from .discovery.channel_scoring import ChannelScoringService, CrawlPriorityPolic
 from .discovery.expansion import DiscoveryExpansionService
 from .discovery.ytdlp_provider import YtDlpDiscoveryProvider
 from .operations.planner import OperationalPlanner, WorkPlanExecutor
+from .operations.video_scoring import VideoScoringService
 from .transcripts.opencli_provider import OpenCliTranscriptProvider
 from .transcripts.provider import (
     TranscriptBatchReport,
@@ -477,6 +478,58 @@ def top_channels(
     return 0
 
 
+def score_video(
+    args: argparse.Namespace,
+    _: ChannelDiscoveryProvider | None = None,
+    __: ChannelVideoProvider | None = None,
+    ___: VideoMetadataProvider | None = None,
+    ____: TranscriptProvider | None = None,
+    repository: ChannelRepository | None = None,
+) -> int:
+    try:
+        score = VideoScoringService(_video_repository(repository)).score_video(args.video_id)
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    print(f"Video: {score.video_id}")
+    print(f"Score: {score.score:.1f}")
+    print(f"Tier: {score.tier}")
+    print(f"Reason: {score.reason_json}")
+    return 0
+
+
+def score_videos(
+    args: argparse.Namespace,
+    _: ChannelDiscoveryProvider | None = None,
+    __: ChannelVideoProvider | None = None,
+    ___: VideoMetadataProvider | None = None,
+    ____: TranscriptProvider | None = None,
+    repository: ChannelRepository | None = None,
+) -> int:
+    scores = VideoScoringService(_video_repository(repository)).score_videos(args.limit)
+    print(f"Videos scored: {len(scores)}")
+    return 0
+
+
+def top_videos(
+    args: argparse.Namespace,
+    _: ChannelDiscoveryProvider | None = None,
+    __: ChannelVideoProvider | None = None,
+    ___: VideoMetadataProvider | None = None,
+    ____: TranscriptProvider | None = None,
+    repository: ChannelRepository | None = None,
+) -> int:
+    rows = _video_repository(repository).list_top_video_scores(args.limit)
+    print("Score  Tier    Video                 Channel                 Recency Views")
+    for row in rows:
+        print(
+            f"{float(row['score']):5.1f}  {row['tier']:<7} "
+            f"{str(row['title'])[:20]:<20} {str(row['channel_title'])[:22]:<22} "
+            f"{float(row['recency_score']):6.1f} {row['view_count'] or 0}"
+        )
+    return 0
+
+
 def plan_work(
     args: argparse.Namespace,
     _: ChannelDiscoveryProvider | None = None,
@@ -866,6 +919,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     top_channels_parser.add_argument("--limit", type=positive_int, required=True)
     top_channels_parser.set_defaults(handler=top_channels)
+
+    score_video_parser = subparsers.add_parser("score-video", help="Cham diem mot video")
+    score_video_parser.add_argument("video_id")
+    score_video_parser.set_defaults(handler=score_video)
+
+    score_videos_parser = subparsers.add_parser("score-videos", help="Cham diem video")
+    score_videos_parser.add_argument("--limit", type=positive_int, required=True)
+    score_videos_parser.set_defaults(handler=score_videos)
+
+    top_videos_parser = subparsers.add_parser("top-videos", help="Hien thi video uu tien")
+    top_videos_parser.add_argument("--limit", type=positive_int, required=True)
+    top_videos_parser.set_defaults(handler=top_videos)
 
     plan_parser = subparsers.add_parser("plan-work", help="Lap ke hoach cong viec")
     plan_parser.add_argument("--max-crawls", type=nonnegative_int, required=True)

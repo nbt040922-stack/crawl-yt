@@ -20,6 +20,7 @@ from .models import (
     Transcript,
     TranscriptAttempt,
     Video,
+    VideoScore,
     WorkItem,
     WorkPlan,
 )
@@ -263,6 +264,28 @@ class ChannelRepository:
                     ON work_items(status);
                 CREATE INDEX IF NOT EXISTS idx_work_items_priority
                     ON work_items(priority);
+                CREATE TABLE IF NOT EXISTS video_scores (
+                    video_id TEXT PRIMARY KEY,
+                    score REAL NOT NULL,
+                    recency_score REAL NOT NULL,
+                    channel_score REAL NOT NULL,
+                    traction_score REAL NOT NULL,
+                    metadata_value_score REAL NOT NULL,
+                    transcript_value_score REAL NOT NULL,
+                    confidence_score REAL NOT NULL,
+                    tier TEXT NOT NULL,
+                    reason_json TEXT NOT NULL,
+                    scored_at TEXT NOT NULL,
+                    scoring_version TEXT NOT NULL,
+                    FOREIGN KEY (video_id) REFERENCES videos(video_id)
+                        ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_video_scores_score
+                    ON video_scores(score);
+                CREATE INDEX IF NOT EXISTS idx_video_scores_tier
+                    ON video_scores(tier);
+                CREATE INDEX IF NOT EXISTS idx_video_scores_scored_at
+                    ON video_scores(scored_at);
                 """
             )
             video_columns = {
@@ -475,6 +498,93 @@ class ChannelRepository:
 
 
 class VideoRepository(ChannelRepository):
+    def upsert_video_score(self, score: VideoScore) -> VideoScore:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO video_scores (
+                    video_id, score, recency_score, channel_score, traction_score,
+                    metadata_value_score, transcript_value_score, confidence_score,
+                    tier, reason_json, scored_at, scoring_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(video_id) DO UPDATE SET
+                    score=excluded.score,
+                    recency_score=excluded.recency_score,
+                    channel_score=excluded.channel_score,
+                    traction_score=excluded.traction_score,
+                    metadata_value_score=excluded.metadata_value_score,
+                    transcript_value_score=excluded.transcript_value_score,
+                    confidence_score=excluded.confidence_score,
+                    tier=excluded.tier,
+                    reason_json=excluded.reason_json,
+                    scored_at=excluded.scored_at,
+                    scoring_version=excluded.scoring_version
+                """,
+                (
+                    score.video_id, score.score, score.recency_score,
+                    score.channel_score, score.traction_score,
+                    score.metadata_value_score, score.transcript_value_score,
+                    score.confidence_score, score.tier, score.reason_json,
+                    self._timestamp(score.scored_at), score.scoring_version,
+                ),
+            )
+        return score
+
+    def get_video_score(self, video_id: str) -> VideoScore | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM video_scores WHERE video_id = ?", (video_id,)
+            ).fetchone()
+        return self._video_score(row) if row else None
+
+    def get_video_scoring_input(self, video_id: str) -> dict[str, object] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT v.*, c.subscriber_count AS channel_subscriber_count,
+                       cs.score AS channel_score,
+                       EXISTS (SELECT 1 FROM transcripts t WHERE t.video_id = v.video_id)
+                           AS transcript_present
+                FROM videos v
+                JOIN channels c ON c.channel_id = v.channel_id
+                LEFT JOIN channel_scores cs ON cs.channel_id = v.channel_id
+                WHERE v.video_id = ?
+                """,
+                (video_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "video": self._video(row),
+            "channel_subscribers": row["channel_subscriber_count"],
+            "channel_score": row["channel_score"],
+            "transcript_present": bool(row["transcript_present"]),
+        }
+
+    def list_video_ids(self, limit: int) -> list[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT video_id FROM videos ORDER BY first_seen_at, video_id LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [str(row["video_id"]) for row in rows]
+
+    def list_top_video_scores(self, limit: int) -> list[dict[str, object]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT s.*, v.title, v.channel_id, c.title AS channel_title,
+                       v.published_at, v.view_count
+                FROM video_scores s
+                JOIN videos v ON v.video_id = s.video_id
+                JOIN channels c ON c.channel_id = v.channel_id
+                ORDER BY s.score DESC, s.video_id
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def create_work_plan(self, plan: WorkPlan, items: list[WorkItem]) -> WorkPlan:
         with self._connect() as connection:
             cursor = connection.execute(
@@ -716,6 +826,23 @@ class VideoRepository(ChannelRepository):
                 (item_type, self._timestamp(now), item_type, limit),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    @staticmethod
+    def _video_score(row: sqlite3.Row) -> VideoScore:
+        return VideoScore(
+            video_id=row["video_id"],
+            score=float(row["score"]),
+            recency_score=float(row["recency_score"]),
+            channel_score=float(row["channel_score"]),
+            traction_score=float(row["traction_score"]),
+            metadata_value_score=float(row["metadata_value_score"]),
+            transcript_value_score=float(row["transcript_value_score"]),
+            confidence_score=float(row["confidence_score"]),
+            tier=row["tier"],
+            reason_json=row["reason_json"],
+            scored_at=datetime.fromisoformat(row["scored_at"]),
+            scoring_version=row["scoring_version"],
+        )
 
     @staticmethod
     def _work_plan(row: sqlite3.Row) -> WorkPlan:

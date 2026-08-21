@@ -115,6 +115,13 @@ class CliTests(unittest.TestCase):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             build_parser().parse_args(["execute-plan", "1"])
 
+    def test_video_scoring_commands_and_explicit_limits(self) -> None:
+        self.assertEqual(build_parser().parse_args(["score-video", "v1"]).video_id, "v1")
+        self.assertEqual(build_parser().parse_args(["score-videos", "--limit", "20"]).limit, 20)
+        self.assertEqual(build_parser().parse_args(["top-videos", "--limit", "10"]).limit, 10)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            build_parser().parse_args(["score-videos"])
+
     def test_dry_run_does_not_persist(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = ChannelRepository(Path(directory) / "test.db")

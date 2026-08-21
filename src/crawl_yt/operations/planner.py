@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from ..database.models import OperationalBudget, WorkItem, WorkPlan
 from ..database.repository import VideoRepository
+from .video_scoring import VideoScoringService
 
 TIER_BASE = {"high": 300.0, "medium": 200.0, "unscored": 150.0, "low": 100.0}
 
@@ -21,8 +22,15 @@ def _days_ago(value: str | None, now: datetime) -> float | None:
 
 
 class OperationalPlanner:
-    def __init__(self, repository: VideoRepository) -> None:
+    def __init__(
+        self,
+        repository: VideoRepository,
+        video_scorer: VideoScoringService | None = None,
+        candidate_pool_multiplier: int = 5,
+    ) -> None:
         self.repository = repository
+        self.video_scorer = video_scorer or VideoScoringService(repository)
+        self.candidate_pool_multiplier = max(1, candidate_pool_multiplier)
 
     def plan(
         self,
@@ -92,29 +100,28 @@ class OperationalPlanner:
     def _video_items(
         self, item_type: str, limit: int, now: datetime
     ) -> list[WorkItem]:
-        items: list[WorkItem] = []
-        for row in self.repository.list_video_work_candidates(item_type, limit, now):
-            channel_score = float(row["score"] or 0)
-            days = _days_ago(row["published_at"], now)
-            recency = 0.0 if days is None else max(0.0, 100.0 - days / 3)
-            enriched_bonus = (
-                20.0
-                if item_type == "transcript_video"
-                and row["metadata_enriched_at"] is not None
-                else 0.0
+        ranked: list[tuple[float, str, WorkItem]] = []
+        pool_limit = max(limit, limit * self.candidate_pool_multiplier)
+        for row in self.repository.list_video_work_candidates(item_type, pool_limit, now):
+            score = self.video_scorer.score_video(str(row["video_id"]), now)
+            priority = (
+                score.score
+                if item_type == "enrich_video"
+                else score.transcript_value_score
             )
-            priority = channel_score * 2 + recency + enriched_bonus
             reasons = {
-                "channel_score": channel_score,
-                "published_days_ago": round(days, 2) if days is not None else None,
+                "video_score": score.score,
+                "video_tier": score.tier,
+                "metadata_priority": score.score,
+                "transcript_priority": score.transcript_value_score,
+                "confidence": score.confidence_score,
             }
             if item_type == "enrich_video":
                 reasons["metadata_pending"] = True
             else:
-                reasons["metadata_enriched"] = row["metadata_enriched_at"] is not None
+                reasons["metadata_enriched"] = score.reason_json.find('"metadata_present": true') >= 0
                 reasons["caption_only"] = True
-            items.append(
-                WorkItem(
+            item = WorkItem(
                     None,
                     0,
                     item_type,
@@ -124,8 +131,9 @@ class OperationalPlanner:
                     reasons,
                     now,
                 )
-            )
-        return items
+            ranked.append((priority, str(row["video_id"]), item))
+        ranked.sort(key=lambda entry: (-entry[0], entry[1]))
+        return [item for _, _, item in ranked[:limit]]
 
 
 @dataclass(slots=True)
