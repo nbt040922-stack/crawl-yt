@@ -282,6 +282,29 @@ class WebTests(unittest.TestCase):
         self.assertIn("2026-08-21 17:46 UTC", response.text)
         self.assertNotIn("ChannelCrawlState(", response.text)
 
+    def test_channel_detail_shows_policy_interval_for_unscored(self) -> None:
+        response = self.client.get("/channels/UC1")
+        self.assertIn("Recommended interval", response.text)
+        self.assertIn("1 day", response.text)
+        self.assertNotIn("1 day, 0:00:00", response.text)
+
+    def test_channel_detail_shows_policy_interval_by_tier(self) -> None:
+        now = datetime.now(timezone.utc)
+        for channel_id, tier, interval in (("UC1", "high", "3 days"), ("UC2", "medium", "7 days")):
+            self.repository.upsert_channel_score(ChannelScore(channel_id, 80, 80, 80, 80, 80, tier, {}, now, "v2"))
+            response = self.client.get(f"/channels/{channel_id}")
+            self.assertIn(interval, response.text)
+            self.assertNotIn("days, 0:00:00", response.text)
+        self.repository.upsert_channel(Channel("UC3", "Three"))
+        self.repository.upsert_channel_score(ChannelScore("UC3", 20, 20, 20, 20, 20, "low", {}, now, "v2"))
+        self.assertIn("14 days", self.client.get("/channels/UC3").text)
+
+    def test_channels_table_shows_recommended_intervals(self) -> None:
+        now = datetime.now(timezone.utc)
+        self.repository.upsert_channel_score(ChannelScore("UC1", 80, 80, 80, 80, 80, "high", {}, now, "v2"))
+        self.assertIn("3 days", self.client.get("/channels").text)
+        self.assertIn("1 day", self.client.get("/channels").text)
+
     def test_channel_zero_subscribers_is_not_missing(self) -> None:
         self.repository.upsert_channel(Channel("UC0", "Zero", subscriber_count=0))
         response = self.client.get("/channels/UC0")

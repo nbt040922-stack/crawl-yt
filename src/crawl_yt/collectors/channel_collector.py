@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from time import perf_counter
 from typing import Iterable, Protocol
 
@@ -57,7 +57,7 @@ class ChannelCrawlService:
         self,
         provider: ChannelVideoProvider,
         repository: VideoRepository,
-        crawl_interval: timedelta = timedelta(hours=24),
+        crawl_interval: timedelta | None = None,
         priority_policy: CrawlPriorityPolicy | None = None,
         scoring_lifecycle: ChannelScoringLifecycle | None = None,
     ) -> None:
@@ -74,6 +74,7 @@ class ChannelCrawlService:
         *,
         full: bool = False,
         known_stop_threshold: int = 5,
+        now: datetime | None = None,
     ) -> CrawlReport:
         channel = self.repository.get_channel(channel_id)
         if channel is None:
@@ -86,7 +87,8 @@ class ChannelCrawlService:
         incremental = not full and state is not None and state.total_crawls > 0
         report = CrawlReport(channel_id, channel.title, "incremental" if incremental else "full")
         started = perf_counter()
-        self.repository.mark_crawl_started(channel_id)
+        crawl_now = now or datetime.now(timezone.utc)
+        self.repository.mark_crawl_started(channel_id, now=crawl_now)
         seen_ids: set[str] = set()
         consecutive_known = 0
         last_seen: Video | None = None
@@ -118,23 +120,28 @@ class ChannelCrawlService:
                     break
         except Exception as error:
             self.repository.mark_crawl_failure(
-                channel_id, str(error), crawl_interval=self.crawl_interval
+                channel_id, str(error), now=crawl_now, crawl_interval=self.crawl_interval
             )
             raise
-        channel_score = self.repository.get_channel_score(channel_id)
-        interval = self.priority_policy.interval_for(
-            channel_score.tier if channel_score else None
-        )
+        previous_score = self.repository.get_channel_score(channel_id)
+        tier = previous_score.tier if previous_score else None
+        try:
+            rescored = self.scoring_lifecycle.score_channel(channel_id)
+            tier = getattr(rescored, "tier", None) or (
+                self.repository.get_channel_score(channel_id).tier
+                if self.repository.get_channel_score(channel_id)
+                else tier
+            )
+        except Exception as error:
+            report.scoring_error = str(error)
+        interval = self.priority_policy.interval_for(tier)
         self.repository.mark_crawl_success(
             channel_id,
             last_seen.video_id if last_seen else None,
             last_seen.published_at if last_seen else None,
+            now=crawl_now,
             crawl_interval=interval,
         )
-        try:
-            self.scoring_lifecycle.score_channel(channel_id)
-        except Exception as error:
-            report.scoring_error = str(error)
         report.elapsed_seconds = perf_counter() - started
         return report
 

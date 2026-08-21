@@ -26,6 +26,7 @@ from ..operations.video_scoring import VideoScoringService
 from ..transcripts.provider import TranscriptService
 from ..transcripts.ytdlp_provider import YtDlpTranscriptProvider
 from ..scoring_lifecycle import ChannelScoringLifecycle
+from ..crawl_policy import CrawlPriorityPolicy
 
 ROOT = Path(__file__).parent
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
@@ -119,7 +120,7 @@ def create_app(
             sort = "score"
         total = database.count_channels_page(search, tier, keyword, min_videos_per_week)
         rows = database.list_channels_page(per_page, (page - 1) * per_page, search, tier, keyword, min_videos_per_week, sort)
-        return render(request, "list.html", title="Channels", page_kind="channels", rows=rows, page=page, per_page=per_page, total=total, search=search, keyword=keyword, keyword_options=database.list_discovery_keywords(), min_videos_per_week=min_videos_per_week, sort=sort, message=message)
+        return render(request, "list.html", title="Channels", page_kind="channels", rows=rows, page=page, per_page=per_page, total=total, search=search, keyword=keyword, keyword_options=database.list_discovery_keywords(), min_videos_per_week=min_videos_per_week, sort=sort, message=message, crawl_interval_labels={"high": "3 days", "medium": "7 days", "low": "14 days", "unscored": "1 day"})
 
     @app.get("/channels/{channel_id}", response_class=HTMLResponse)
     def channel_detail(request: Request, channel_id: str) -> HTMLResponse:
@@ -127,8 +128,10 @@ def create_app(
         if channel is None:
             raise HTTPException(404, "Channel not found")
         discoveries = database.list_discoveries_for_channel(channel_id)
+        score = database.get_channel_score(channel_id)
+        state = database.get_channel_crawl_state(channel_id)
         return render(request, "detail.html", title=channel.title, kind="channel", channel=channel,
-                      score=database.get_channel_score(channel_id), score_view=_channel_score_view(database.get_channel_score(channel_id)), state=database.get_channel_crawl_state(channel_id), state_view=_crawl_state_view(database.get_channel_crawl_state(channel_id)),
+                      score=score, score_view=_channel_score_view(score), state=state, state_view=_crawl_state_view(state, score),
                       discoveries=[{"keyword": item.keyword, "source": item.source, "discovered_at": _format_datetime(item.discovered_at)} for item in discoveries], videos=database.list_videos_for_channel(channel_id, 20))
 
     @app.post("/channels/{channel_id}/score")
@@ -319,10 +322,23 @@ def _video_score_view(score: Any | None) -> dict[str, Any] | None:
     }
 
 
-def _crawl_state_view(state: Any | None) -> dict[str, Any] | None:
+def _crawl_state_view(state: Any | None, score: Any | None = None) -> dict[str, Any]:
+    policy = CrawlPriorityPolicy()
+    tier = getattr(score, "tier", None) if score is not None else None
     if state is None:
-        return None
+        return {
+            "tier": tier or "unscored",
+            "recommended_interval": _format_interval(policy.interval_for(tier)),
+            "last_crawl": None,
+            "last_success": None,
+            "last_error": None,
+            "next_crawl": None,
+            "total_crawls": 0,
+            "failures": 0,
+        }
     return {
+        "tier": tier or "unscored",
+        "recommended_interval": _format_interval(policy.interval_for(tier)),
         "last_crawl": _format_datetime(state.last_crawl_completed_at),
         "last_success": _format_datetime(state.last_success_at),
         "last_error": state.last_error,
@@ -330,3 +346,8 @@ def _crawl_state_view(state: Any | None) -> dict[str, Any] | None:
         "total_crawls": state.total_crawls,
         "failures": state.consecutive_failures,
     }
+
+
+def _format_interval(value) -> str:
+    days = value.days
+    return f"{days} day" if days == 1 else f"{days} days"

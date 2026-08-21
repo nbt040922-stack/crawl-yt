@@ -79,9 +79,10 @@ han so entry trong ca hai mode. Provider tra iterator lazy de service co the
 dung ma khong tao list hang nghin video trong bo nho.
 
 `crawl-due --limit N` chi crawl tuan tu cac channel co `next_crawl_at` da den,
-va tiep tuc neu mot channel loi. Khoang lap Phase 2A mac dinh la 24 gio; khong
-co scheduler nen lenh khong tu chay. `crawl-all` duoc giu de tuong thich, con
-`crawl-due` la lua chon van hanh uu tien.
+va tiep tuc neu mot channel loi. Scheduling Policy v2 dung high 3 ngay, medium
+7 ngay, low 14 ngay, unscored 1 ngay; full/deep refresh tham chieu 14 ngay.
+Khong co scheduler nen lenh khong tu chay. `crawl-all` duoc giu de tuong
+thich, con `crawl-due` la lua chon van hanh uu tien.
 
 Channel Scoring v2 hoan toan deterministic va chi doc SQLite cuc bo; khong goi
 YouTube, LLM hay dich vu tra phi. `score-channel` tinh mot kenh, `score-all`
@@ -106,9 +107,11 @@ du 30/90 ngay va consistency moi la `mature`. Keyword lien quan chi la bang
 chung provenance, chua co semantic clustering.
 
 Tier `high` tu 70, `medium` tu 40, con lai la `low`. Sau mot crawl thanh cong,
-tier quyet dinh lan tiep theo: high 12 gio, medium 24 gio, low 72 gio, unscored
-24 gio. Scoring chi thay doi uu tien; khong xoa channel. Khi cadence/traction
-thieu, v2 dung cadence neutral va ha confidence thay vi coi NULL la 0.
+tier quyet dinh lan tiep theo: high 3 ngay, medium 7 ngay, low 14 ngay,
+unscored 1 ngay. Failed crawl duoc retry sau 1/2/3 ngay (toi da 3 ngay), sau
+success thi reset ve interval cua tier. Scoring chi thay doi uu tien; khong
+xoa channel. Khi cadence/traction thieu, v2 dung cadence neutral va ha
+confidence thay vi coi NULL la 0.
 
 Discovery expansion dung frontier co uu tien, khong recursion an trong provider.
 Moi run bat buoc co `--max-depth`, `--channel-budget` va `--query-budget`;

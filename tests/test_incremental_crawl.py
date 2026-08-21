@@ -89,13 +89,17 @@ class IncrementalCrawlTests(unittest.TestCase):
         self.assertEqual(provider.yielded, 3)
 
     def test_success_state_and_next_crawl(self) -> None:
-        service, _ = self.service("v1")
+        class NoScoreLifecycle:
+            def score_channel(self, channel_id):
+                return None
+        provider = StreamingProvider({"UC1": self.videos("v1")})
+        service = ChannelCrawlService(provider, self.repository, scoring_lifecycle=NoScoreLifecycle())
         service.crawl("UC1")
         state = self.repository.get_channel_crawl_state("UC1")
         self.assertEqual(state.last_seen_video_id, "v1")
         self.assertEqual(state.total_crawls, 1)
         self.assertEqual(state.consecutive_failures, 0)
-        self.assertGreaterEqual(state.next_crawl_at, state.last_success_at + timedelta(hours=24))
+        self.assertEqual(state.next_crawl_at, state.last_success_at + timedelta(days=1))
 
     def test_failure_increments_and_success_resets(self) -> None:
         provider = StreamingProvider(fail_channels={"UC1"})
@@ -110,6 +114,15 @@ class IncrementalCrawlTests(unittest.TestCase):
         state = self.repository.get_channel_crawl_state("UC1")
         self.assertEqual((state.consecutive_failures, state.total_crawls), (0, 3))
         self.assertIsNotNone(state.last_success_at)
+
+    def test_failure_retry_schedule_is_capped_at_three_days(self) -> None:
+        provider = StreamingProvider(fail_channels={"UC1"})
+        service = ChannelCrawlService(provider, self.repository)
+        for count, days in ((1, 1), (2, 2), (3, 3), (4, 3)):
+            with self.assertRaises(RuntimeError):
+                service.crawl("UC1", now=NOW)
+            state = self.repository.get_channel_crawl_state("UC1")
+            self.assertEqual(state.next_crawl_at, NOW + timedelta(days=days))
 
     def test_midstream_failure_does_not_mark_success(self) -> None:
         class MidstreamFailure:
@@ -134,6 +147,15 @@ class IncrementalCrawlTests(unittest.TestCase):
         self.assertEqual([item.channel_id for item in due], ["UC1"])
         counts = self.repository.crawl_state_counts(now=at_due)
         self.assertEqual(counts, {"never_crawled": 1, "due": 1, "healthy": 1, "failing": 0})
+
+    def test_manual_crawl_overrides_future_due_time_and_resets_policy(self) -> None:
+        self.repository.mark_crawl_success("UC1", None, None, now=NOW - timedelta(days=1), crawl_interval=timedelta(days=14))
+        self.assertEqual(self.repository.list_channels_due_for_crawl(now=NOW), [])
+        service, _ = self.service("manual")
+        service.crawl("UC1", now=NOW)
+        state = self.repository.get_channel_crawl_state("UC1")
+        self.assertGreater(state.next_crawl_at, NOW)
+        self.assertEqual(state.next_crawl_at, NOW + timedelta(days=14))
 
     def test_crawl_due_continues_after_failure(self) -> None:
         self.repository.upsert_channel(Channel("UC2", "Two"))

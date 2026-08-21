@@ -8,6 +8,11 @@ from datetime import datetime, timedelta, timezone
 
 from ..database.models import Channel, ChannelScore
 from ..database.repository import VideoRepository
+from ..crawl_policy import (
+    FULL_REFRESH_INTERVAL,
+    CrawlPriorityPolicy,
+    failure_retry_interval,
+)
 
 SCORING_VERSION = "v2"
 WEIGHTS = {
@@ -104,18 +109,6 @@ def _consistency_label(active_weeks_ratio: float | None) -> str:
     if active_weeks_ratio >= 0.45:
         return "medium"
     return "low"
-
-
-class CrawlPriorityPolicy:
-    INTERVALS = {
-        "high": timedelta(hours=12),
-        "medium": timedelta(hours=24),
-        "low": timedelta(hours=72),
-        "unscored": timedelta(hours=24),
-    }
-
-    def interval_for(self, tier: str | None) -> timedelta:
-        return self.INTERVALS.get(tier or "unscored", self.INTERVALS["unscored"])
 
 
 class ChannelScoringService:

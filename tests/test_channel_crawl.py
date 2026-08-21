@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.crawl_yt.collectors.channel_collector import (
@@ -106,9 +106,39 @@ class ChannelCrawlTests(unittest.TestCase):
     def test_score_failure_does_not_change_crawl_success(self) -> None:
         class Lifecycle:
             def score_channel(self, channel_id): raise RuntimeError("score failed")
-        report = ChannelCrawlService(FakeVideoProvider(), self.repository, scoring_lifecycle=Lifecycle()).crawl("UC123")
+        report = ChannelCrawlService(FakeVideoProvider(), self.repository, scoring_lifecycle=Lifecycle()).crawl("UC123", now=datetime(2026, 8, 13, tzinfo=timezone.utc))
         self.assertEqual(report.scoring_error, "score failed")
-        self.assertEqual(self.repository.get_channel_crawl_state("UC123").total_crawls, 1)
+        state = self.repository.get_channel_crawl_state("UC123")
+        self.assertEqual(state.total_crawls, 1)
+        self.assertEqual(state.next_crawl_at, datetime(2026, 8, 14, tzinfo=timezone.utc))
+
+    def test_successful_crawl_uses_tier_after_rescore(self) -> None:
+        class Lifecycle:
+            def score_channel(self, channel_id):
+                from src.crawl_yt.database.models import ChannelScore
+                return ChannelScore(channel_id, 80, 80, 80, 80, 80, "high", {}, datetime.now(timezone.utc), "v2")
+        report = ChannelCrawlService(FakeVideoProvider(), self.repository, scoring_lifecycle=Lifecycle()).crawl(
+            "UC123", now=datetime(2026, 8, 13, tzinfo=timezone.utc)
+        )
+        self.assertIsNone(report.scoring_error)
+        state = self.repository.get_channel_crawl_state("UC123")
+        self.assertEqual(state.next_crawl_at, datetime(2026, 8, 16, tzinfo=timezone.utc))
+
+    def test_successful_crawl_uses_medium_and_low_intervals(self) -> None:
+        class Lifecycle:
+            def __init__(self, tier): self.tier = tier
+            def score_channel(self, channel_id):
+                from src.crawl_yt.database.models import ChannelScore
+                return ChannelScore(channel_id, 50, 50, 50, 50, 50, self.tier, {}, datetime.now(timezone.utc), "v2")
+        base = datetime(2026, 8, 13, tzinfo=timezone.utc)
+        for tier, days in (("medium", 7), ("low", 14)):
+            self.repository.upsert_channel(Channel(f"{tier}-channel", tier))
+            service = ChannelCrawlService(
+                FakeVideoProvider(), self.repository, scoring_lifecycle=Lifecycle(tier)
+            )
+            service.crawl(f"{tier}-channel", now=base, full=True)
+            state = self.repository.get_channel_crawl_state(f"{tier}-channel")
+            self.assertEqual(state.next_crawl_at, base + timedelta(days=days))
 
 
 if __name__ == "__main__":

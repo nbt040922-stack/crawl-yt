@@ -25,6 +25,7 @@ from .models import (
     WorkPlan,
 )
 from ..discovery.normalization import normalize_discovery_keyword
+from ..crawl_policy import failure_retry_interval
 
 
 class ChannelRepository:
@@ -1535,7 +1536,7 @@ class VideoRepository(ChannelRepository):
         last_seen_video_id: str | None,
         last_seen_published_at: datetime | None,
         now: datetime | None = None,
-        crawl_interval: timedelta = timedelta(hours=24),
+        crawl_interval: timedelta = timedelta(days=1),
     ) -> None:
         completed_at = now or datetime.now(timezone.utc)
         self.ensure_channel_crawl_state(channel_id)
@@ -1567,10 +1568,11 @@ class VideoRepository(ChannelRepository):
         channel_id: str,
         error: str,
         now: datetime | None = None,
-        crawl_interval: timedelta = timedelta(hours=24),
+        crawl_interval: timedelta | None = None,
     ) -> None:
         failed_at = now or datetime.now(timezone.utc)
-        self.ensure_channel_crawl_state(channel_id)
+        state = self.ensure_channel_crawl_state(channel_id)
+        interval = crawl_interval or failure_retry_interval(state.consecutive_failures + 1)
         with self._connect() as connection:
             connection.execute(
                 """
@@ -1583,7 +1585,7 @@ class VideoRepository(ChannelRepository):
                 (
                     self._timestamp(failed_at),
                     error,
-                    self._timestamp(failed_at + crawl_interval),
+                    self._timestamp(failed_at + interval),
                     self._timestamp(failed_at),
                     channel_id,
                 ),

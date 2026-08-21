@@ -16,6 +16,8 @@ from src.crawl_yt.discovery.channel_scoring import (
     SCORING_VERSION,
     ChannelScoringService,
     CrawlPriorityPolicy,
+    FULL_REFRESH_INTERVAL,
+    failure_retry_interval,
     cadence_fit,
     cadence_score,
     score_tier,
@@ -320,17 +322,35 @@ class ChannelScoringTests(unittest.TestCase):
         self.add_channel("low")
         self.repository.upsert_channel_score(self.manual_score("high", 80, "high"))
         self.repository.upsert_channel_score(self.manual_score("low", 20, "low"))
-        service = ChannelCrawlService(EmptyProvider(), self.repository)
+        class ExistingScoreLifecycle:
+            def score_channel(inner_self, channel_id):
+                return self.repository.get_channel_score(channel_id)
+        service = ChannelCrawlService(EmptyProvider(), self.repository, scoring_lifecycle=ExistingScoreLifecycle())
         service.crawl("high")
         service.crawl("low")
         high = self.repository.get_channel_crawl_state("high")
         low = self.repository.get_channel_crawl_state("low")
         high_interval = high.next_crawl_at - high.last_success_at
         low_interval = low.next_crawl_at - low.last_success_at
-        self.assertEqual(high_interval, timedelta(hours=12))
-        self.assertEqual(low_interval, timedelta(hours=72))
+        self.assertEqual(high_interval, timedelta(days=3))
+        self.assertEqual(low_interval, timedelta(days=14))
         self.assertLess(high_interval, low_interval)
-        self.assertEqual(CrawlPriorityPolicy().interval_for(None), timedelta(hours=24))
+        self.assertEqual(CrawlPriorityPolicy().interval_for(None), timedelta(days=1))
+
+    def test_v2_crawl_intervals_and_full_refresh_reference(self) -> None:
+        policy = CrawlPriorityPolicy()
+        self.assertEqual(policy.interval_for("high"), timedelta(days=3))
+        self.assertEqual(policy.interval_for("medium"), timedelta(days=7))
+        self.assertEqual(policy.interval_for("low"), timedelta(days=14))
+        self.assertEqual(policy.interval_for("unscored"), timedelta(days=1))
+        self.assertEqual(policy.interval_for("unknown"), timedelta(days=1))
+        self.assertEqual(FULL_REFRESH_INTERVAL, timedelta(days=14))
+
+    def test_failure_retry_intervals_are_capped(self) -> None:
+        self.assertEqual(failure_retry_interval(1), timedelta(days=1))
+        self.assertEqual(failure_retry_interval(2), timedelta(days=2))
+        self.assertEqual(failure_retry_interval(3), timedelta(days=3))
+        self.assertEqual(failure_retry_interval(10), timedelta(days=3))
 
     @staticmethod
     def manual_score(channel_id: str, score: float, tier: str = "medium") -> ChannelScore:
