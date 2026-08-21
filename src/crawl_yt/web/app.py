@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
+import json
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -23,6 +25,7 @@ from ..operations.planner import OperationalPlanner, WorkPlanExecutor
 from ..operations.video_scoring import VideoScoringService
 from ..transcripts.provider import TranscriptService
 from ..transcripts.ytdlp_provider import YtDlpTranscriptProvider
+from ..scoring_lifecycle import ChannelScoringLifecycle
 
 ROOT = Path(__file__).parent
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
@@ -94,6 +97,8 @@ def create_app(
             new_channel_ids=set(report.new_channel_ids),
             dry_run=dry_run,
             keyword=keyword.strip(),
+            channels_scored=report.channels_scored,
+            scoring_failures=report.scoring_failures,
         )
 
     @app.get("/discovery/keywords/{keyword}", response_class=HTMLResponse)
@@ -105,21 +110,26 @@ def create_app(
         return render(request, "discovery_keyword.html", title=f"Discovery: {keyword}", keyword=keyword, rows=rows, page=page, per_page=per_page, total=total)
 
     @app.get("/channels", response_class=HTMLResponse)
-    def channels(request: Request, page: int = 1, per_page: int = 50, search: str | None = None, tier: str | None = None, keyword: str | None = None) -> HTMLResponse:
+    def channels(request: Request, page: int = 1, per_page: int = 50, search: str | None = None, tier: str | None = None, keyword: str | None = None, min_videos_per_week: float | None = None, sort: str = "score", message: str | None = None) -> HTMLResponse:
         per_page = min(max(per_page, 1), 100)
         page = max(page, 1)
-        total = database.count_channels_page(search, tier, keyword)
-        rows = database.list_channels_page(per_page, (page - 1) * per_page, search, tier, keyword)
-        return render(request, "list.html", title="Channels", page_kind="channels", rows=rows, page=page, per_page=per_page, total=total, search=search, keyword=keyword, keyword_options=database.list_discovery_keywords())
+        if min_videos_per_week is not None and min_videos_per_week < 0:
+            raise HTTPException(400, "minimum videos/week cannot be negative")
+        if sort not in {"score", "cadence", "subscribers"}:
+            sort = "score"
+        total = database.count_channels_page(search, tier, keyword, min_videos_per_week)
+        rows = database.list_channels_page(per_page, (page - 1) * per_page, search, tier, keyword, min_videos_per_week, sort)
+        return render(request, "list.html", title="Channels", page_kind="channels", rows=rows, page=page, per_page=per_page, total=total, search=search, keyword=keyword, keyword_options=database.list_discovery_keywords(), min_videos_per_week=min_videos_per_week, sort=sort, message=message)
 
     @app.get("/channels/{channel_id}", response_class=HTMLResponse)
     def channel_detail(request: Request, channel_id: str) -> HTMLResponse:
         channel = database.get_channel(channel_id)
         if channel is None:
             raise HTTPException(404, "Channel not found")
+        discoveries = database.list_discoveries_for_channel(channel_id)
         return render(request, "detail.html", title=channel.title, kind="channel", channel=channel,
-                      score=database.get_channel_score(channel_id), state=database.get_channel_crawl_state(channel_id),
-                      discoveries=database.list_discoveries_for_channel(channel_id), videos=database.list_videos_for_channel(channel_id, 20))
+                      score=database.get_channel_score(channel_id), score_view=_channel_score_view(database.get_channel_score(channel_id)), state=database.get_channel_crawl_state(channel_id), state_view=_crawl_state_view(database.get_channel_crawl_state(channel_id)),
+                      discoveries=[{"keyword": item.keyword, "source": item.source, "discovered_at": _format_datetime(item.discovered_at)} for item in discoveries], videos=database.list_videos_for_channel(channel_id, 20))
 
     @app.post("/channels/{channel_id}/score")
     def channel_score(request: Request, channel_id: str) -> RedirectResponse:
@@ -128,6 +138,14 @@ def create_app(
             raise HTTPException(404, "Channel not found")
         ChannelScoringService(database).score_channel(channel_id)
         return RedirectResponse(f"/channels/{channel_id}", status_code=303)
+
+    @app.post("/channels/score-unscored")
+    def score_unscored_channels(limit: int = Form(...)) -> RedirectResponse:
+        if limit < 1:
+            raise HTTPException(400, "limit must be positive")
+        result = ChannelScoringLifecycle(database).score_unscored_channels(limit)
+        message = f"Channels scored: {result.channels_scored}; scoring failures: {len(result.scoring_failures)}"
+        return RedirectResponse(f"/channels?message={quote(message)}", status_code=303)
 
     @app.post("/channels/{channel_id}/crawl")
     def channel_crawl(channel_id: str, full: bool = Form(False)) -> RedirectResponse:
@@ -161,8 +179,9 @@ def create_app(
         if video is None:
             raise HTTPException(404, "Video not found")
         transcripts = database.list_transcripts_for_video(video_id)
+        video_score = database.get_video_score(video_id)
         return render(request, "detail.html", title=video.title, kind="video", video=video,
-                      score=database.get_video_score(video_id), transcripts=transcripts)
+                      score=video_score, video_score_view=_video_score_view(video_score), transcripts=transcripts)
 
     @app.get("/videos/{video_id}/transcripts/{language}/{source}", response_class=HTMLResponse)
     def transcript_detail(request: Request, video_id: str, language: str, source: str) -> HTMLResponse:
@@ -248,3 +267,64 @@ def _format_segments(segments: list[dict[str, Any]]) -> list[dict[str, str]]:
         secs, millis = divmod(remainder, 1000)
         formatted.append({"timestamp": f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}", "text": str(segment.get("text", ""))})
     return formatted
+
+
+def _format_datetime(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    current = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    return current.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _channel_score_view(score: Any | None) -> dict[str, Any] | None:
+    if score is None:
+        return None
+    reasons = score.reasons if isinstance(score.reasons, dict) else {}
+    rate_30 = reasons.get("videos_per_week_30d", score.videos_per_week_30d)
+    rate_90 = reasons.get("videos_per_week_90d", score.videos_per_week_90d)
+    return {
+        "overall": score.score,
+        "tier": str(score.tier).upper(),
+        "components": [("Topic Relevance", score.relevance_score), ("Upload cadence (Activity)", score.activity_score), ("Performance (Traction)", score.traction_score), ("Confidence", score.confidence_score)],
+        "version": score.scoring_version,
+        "scored_at": _format_datetime(score.scored_at),
+        "notes": list(reasons.get("notes", [])),
+        "videos_per_week_30d": rate_30,
+        "videos_per_week_90d": rate_90,
+        "cadence_fit": reasons.get("cadence_fit", "unknown"),
+        "consistency": reasons.get("consistency", "unknown"),
+        "maturity": reasons.get("score_maturity", "preliminary"),
+        "median_views": reasons.get("median_enriched_views"),
+        "subscriber_count": reasons.get("subscriber_count"),
+        "view_subscriber_ratio": reasons.get("view_subscriber_ratio"),
+    }
+
+
+def _video_score_view(score: Any | None) -> dict[str, Any] | None:
+    if score is None:
+        return None
+    try:
+        reasons = json.loads(score.reason_json)
+    except (TypeError, ValueError):
+        reasons = {}
+    return {
+        "overall": score.score,
+        "tier": str(score.tier).upper(),
+        "components": [("Recency", score.recency_score), ("Channel", score.channel_score), ("Traction", score.traction_score), ("Metadata priority", score.metadata_priority), ("Transcript priority", score.transcript_priority), ("Confidence", score.confidence_score)],
+        "version": score.scoring_version,
+        "scored_at": _format_datetime(score.scored_at),
+        "notes": list(reasons.get("notes", [])) if isinstance(reasons, dict) else [],
+    }
+
+
+def _crawl_state_view(state: Any | None) -> dict[str, Any] | None:
+    if state is None:
+        return None
+    return {
+        "last_crawl": _format_datetime(state.last_crawl_completed_at),
+        "last_success": _format_datetime(state.last_success_at),
+        "last_error": state.last_error,
+        "next_crawl": _format_datetime(state.next_crawl_at),
+        "total_crawls": state.total_crawls,
+        "failures": state.consecutive_failures,
+    }

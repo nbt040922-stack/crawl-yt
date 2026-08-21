@@ -85,6 +85,31 @@ class ChannelCrawlTests(unittest.TestCase):
         self.assertEqual(report.new_videos, 2)
         self.assertEqual(report.failures, [("UC456", "provider failure")])
 
+    def test_successful_crawl_rescores_channel(self) -> None:
+        class Lifecycle:
+            def __init__(self): self.calls = []
+            def score_channel(self, channel_id): self.calls.append(channel_id)
+        lifecycle = Lifecycle()
+        report = ChannelCrawlService(FakeVideoProvider(), self.repository, scoring_lifecycle=lifecycle).crawl("UC123")
+        self.assertIsNone(report.scoring_error)
+        self.assertEqual(lifecycle.calls, ["UC123"])
+
+    def test_failed_crawl_does_not_rescore_channel(self) -> None:
+        class Lifecycle:
+            def __init__(self): self.calls = []
+            def score_channel(self, channel_id): self.calls.append(channel_id)
+        lifecycle = Lifecycle()
+        with self.assertRaises(RuntimeError):
+            ChannelCrawlService(FakeVideoProvider(failing_channel="UC123"), self.repository, scoring_lifecycle=lifecycle).crawl("UC123")
+        self.assertEqual(lifecycle.calls, [])
+
+    def test_score_failure_does_not_change_crawl_success(self) -> None:
+        class Lifecycle:
+            def score_channel(self, channel_id): raise RuntimeError("score failed")
+        report = ChannelCrawlService(FakeVideoProvider(), self.repository, scoring_lifecycle=Lifecycle()).crawl("UC123")
+        self.assertEqual(report.scoring_error, "score failed")
+        self.assertEqual(self.repository.get_channel_crawl_state("UC123").total_crawls, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

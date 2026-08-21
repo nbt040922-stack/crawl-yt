@@ -132,6 +132,24 @@ class VideoMetadataTests(unittest.TestCase):
         self.assertEqual(stored.channel_id, "UC123")
         self.assertIsNone(stored.metadata_enriched_at)
 
+    def test_batch_rescores_each_affected_channel_once(self) -> None:
+        class Lifecycle:
+            def __init__(self): self.calls = []
+            def score_channels(self, channel_ids):
+                self.calls.append(set(channel_ids))
+                return type("Result", (), {"channels_scored": len(channel_ids), "scoring_failures": []})()
+        lifecycle = Lifecycle()
+        report = VideoMetadataService(FakeMetadataProvider(), self.repository, lifecycle).enrich_pending(limit=3)
+        self.assertEqual(lifecycle.calls, [{"UC123"}])
+        self.assertEqual(report.channels_scored, 1)
+
+    def test_failed_enrichment_does_not_rescore(self) -> None:
+        class Lifecycle:
+            def score_channels(self, channel_ids):
+                raise AssertionError("failed enrichment was scored")
+        result = VideoMetadataService(FakeMetadataProvider(failures={"video-1"}), self.repository, Lifecycle()).enrich("video-1")
+        self.assertFalse(result.success)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,7 +10,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from src.crawl_yt.collectors.video_metadata import VideoMetadata
-from src.crawl_yt.database.models import Channel, Transcript, Video
+from src.crawl_yt.database.models import Channel, ChannelScore, Transcript, Video, VideoScore
 from src.crawl_yt.database.repository import TranscriptRepository
 from src.crawl_yt.discovery.channel_discovery import DiscoveryBatch
 from src.crawl_yt.transcripts.provider import TranscriptData
@@ -90,6 +90,18 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.client.get("/videos?page=1&per_page=1").status_code, 200)
         self.assertIn("Video one", self.client.get("/videos").text)
         self.assertEqual(self.client.get("/work-plans").status_code, 200)
+
+    def test_channels_page_exposes_bounded_score_unscored_action(self) -> None:
+        response = self.client.get("/channels")
+        self.assertIn('action="/channels/score-unscored"', response.text)
+        self.assertIn('name="limit"', response.text)
+
+    def test_score_unscored_requires_positive_limit_and_updates_scores(self) -> None:
+        self.assertEqual(self.client.post("/channels/score-unscored", data={"limit": "0"}).status_code, 400)
+        response = self.client.post("/channels/score-unscored", data={"limit": "1"}, follow_redirects=False)
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("/channels?message=", response.headers["location"])
+        self.assertIsNotNone(self.repository.get_channel_score("UC1"))
 
     def test_detail_and_unknown_404(self) -> None:
         self.assertEqual(self.client.get("/channels/UC1").status_code, 200)
@@ -172,6 +184,8 @@ class WebTests(unittest.TestCase):
         self.assertIn("target=\"_blank\"", response.text)
         self.assertIn("New", response.text)
         self.assertIn("Existing", response.text)
+        self.assertIn("Channels scored", response.text)
+        self.assertIn("Scoring failures", response.text)
 
     def test_empty_discovery_result_is_friendly(self) -> None:
         response = TestClient(create_app(repository=self.repository, discovery_provider=EmptyDiscoveryFake())).post("/discovery", data={"keyword": "unknown", "limit": "20"})
@@ -220,6 +234,64 @@ class WebTests(unittest.TestCase):
         response = self.client.get("/channels/UC1")
         self.assertIn("/discovery/keywords/retirement", response.text)
         self.assertIn("/discovery/keywords/social%20security", response.text)
+
+    def test_unscored_channel_is_human_readable(self) -> None:
+        response = self.client.get("/channels/UC1")
+        self.assertIn("Not scored yet", response.text)
+        self.assertIn("Never crawled", response.text)
+        self.assertNotIn("<pre>None</pre>", response.text)
+
+    def test_scored_channel_renders_structured_score_and_reasons(self) -> None:
+        self.repository.upsert_channel_score(ChannelScore("UC1", 82.4, 91.0, 78.5, 74.2, 85.0, "high", {"notes": ["active uploader"], "videos_per_week_30d": 5.8, "videos_per_week_90d": 5.4, "cadence_fit": "very good", "consistency": "high", "score_maturity": "mature"}, datetime.now(timezone.utc), "v2", 78.5, 5.8, 5.4))
+        response = self.client.get("/channels/UC1")
+        for label in ("Overall Score", "82.4", "HIGH", "Relevance", "Upload cadence", "Traction", "Confidence", "Scoring version", "v2", "5.8 videos/week", "5.4 videos/week", "VERY GOOD", "HIGH", "active uploader"):
+            self.assertIn(label, response.text)
+        self.assertNotIn("ChannelScore(", response.text)
+
+    def test_channels_table_supports_cadence_filter_and_sort(self) -> None:
+        now = datetime.now(timezone.utc)
+        self.repository.upsert_channel_score(ChannelScore("UC1", 70, 70, 80, 60, 60, "high", {}, now, "v2", 80, 5.8, 5.0))
+        self.repository.upsert_channel_score(ChannelScore("UC2", 80, 80, 60, 70, 70, "high", {}, now, "v2", 60, 2.0, 2.0))
+        filtered = self.client.get("/channels?min_videos_per_week=5").text
+        self.assertIn("One", filtered)
+        self.assertNotIn('href="/channels/UC2"', filtered)
+        sorted_page = self.client.get("/channels?sort=cadence").text
+        self.assertLess(sorted_page.index("One"), sorted_page.index("Two"))
+        self.assertIn("Videos/week", sorted_page)
+        self.assertIn("5.8 / week", sorted_page)
+
+    def test_score_post_redirects_and_score_appears(self) -> None:
+        response = self.client.post("/channels/UC1/score", follow_redirects=False)
+        self.assertEqual(response.status_code, 303)
+        detail = self.client.get(response.headers["location"])
+        self.assertIn("Overall Score", detail.text)
+
+    def test_crawl_state_and_metadata_empty_states_are_human_readable(self) -> None:
+        self.repository.ensure_channel_crawl_state("UC1")
+        self.repository.mark_crawl_success("UC1", "v1", None, datetime(2026, 8, 21, 17, 46, tzinfo=timezone.utc))
+        response = self.client.get("/channels/UC1")
+        self.assertIn("Last success", response.text)
+        self.assertIn("2026-08-21 17:46 UTC", response.text)
+        self.assertNotIn("ChannelCrawlState(", response.text)
+
+    def test_channel_zero_subscribers_is_not_missing(self) -> None:
+        self.repository.upsert_channel(Channel("UC0", "Zero", subscriber_count=0))
+        response = self.client.get("/channels/UC0")
+        self.assertIn("Subscribers: 0", response.text)
+
+    def test_channel_without_videos_has_empty_state(self) -> None:
+        self.repository.upsert_channel(Channel("UC0", "Empty"))
+        response = self.client.get("/channels/UC0")
+        self.assertIn("No videos stored yet.", response.text)
+
+    def test_video_score_is_structured(self) -> None:
+        score = VideoScore("v1", 77.5, 80.0, 75.0, 70.0, 65.0, 85.0, 78.0, "high", '{"metadata_priority": 70, "transcript_priority": 80}', datetime.now(timezone.utc), "v1")
+        self.repository.upsert_video_score(score)
+        response = self.client.get("/videos/v1")
+        self.assertIn("Overall priority", response.text)
+        self.assertIn("77.5", response.text)
+        self.assertIn("Metadata priority", response.text)
+        self.assertNotIn("VideoScore(", response.text)
 
     def test_empty_discovery_history_and_keyword_states(self) -> None:
         empty_repo = TranscriptRepository(Path(self.temp.name) / "empty.db")

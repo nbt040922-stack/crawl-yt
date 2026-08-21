@@ -8,6 +8,7 @@ from typing import Protocol, TypeVar
 
 from ..database.models import Video
 from ..database.repository import VideoRepository
+from ..scoring_lifecycle import ChannelScoringLifecycle
 
 T = TypeVar("T")
 
@@ -50,16 +51,22 @@ class EnrichmentBatchReport:
     succeeded: int = 0
     failed: int = 0
     results: list[EnrichmentResult] = field(default_factory=list)
+    channels_scored: int = 0
+    scoring_failures: list[tuple[str, str]] = field(default_factory=list)
 
 
 class VideoMetadataService:
     def __init__(
-        self, provider: VideoMetadataProvider, repository: VideoRepository
+        self,
+        provider: VideoMetadataProvider,
+        repository: VideoRepository,
+        scoring_lifecycle: ChannelScoringLifecycle | None = None,
     ) -> None:
         self.provider = provider
         self.repository = repository
+        self.scoring_lifecycle = scoring_lifecycle or ChannelScoringLifecycle(repository)
 
-    def enrich(self, video_id: str) -> EnrichmentResult:
+    def enrich(self, video_id: str, *, rescore: bool = True) -> EnrichmentResult:
         stored = self.repository.get_video(video_id)
         if stored is None:
             return EnrichmentResult(video_id, False, "video is not in the database")
@@ -104,6 +111,8 @@ class VideoMetadataService:
             metadata_enriched_at=now,
         )
         self.repository.upsert_video(enriched)
+        if rescore:
+            self.scoring_lifecycle.score_channels([stored.channel_id])
         return EnrichmentResult(video_id, True)
 
     def enrich_channel(self, channel_id: str, limit: int) -> EnrichmentBatchReport:
@@ -118,12 +127,20 @@ class VideoMetadataService:
 
     def _batch(self, videos: list[Video]) -> EnrichmentBatchReport:
         report = EnrichmentBatchReport()
+        affected_channels: set[str] = set()
         for video in videos:
-            result = self.enrich(video.video_id)
+            result = self.enrich(video.video_id, rescore=False)
             report.attempted += 1
             report.succeeded += result.success
             report.failed += not result.success
             report.results.append(result)
+            if result.success:
+                stored = self.repository.get_video(result.video_id)
+                if stored is not None:
+                    affected_channels.add(stored.channel_id)
+        scoring = self.scoring_lifecycle.score_channels(affected_channels)
+        report.channels_scored = scoring.channels_scored
+        report.scoring_failures = scoring.scoring_failures
         return report
 
     @staticmethod

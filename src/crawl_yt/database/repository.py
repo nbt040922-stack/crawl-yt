@@ -24,6 +24,7 @@ from .models import (
     WorkItem,
     WorkPlan,
 )
+from ..discovery.normalization import normalize_discovery_keyword
 
 
 class ChannelRepository:
@@ -71,6 +72,7 @@ class ChannelRepository:
                 CREATE TABLE IF NOT EXISTS channel_discoveries (
                     channel_id TEXT NOT NULL,
                     keyword TEXT NOT NULL,
+                    normalized_keyword TEXT,
                     source TEXT NOT NULL,
                     discovered_at TEXT NOT NULL,
                     FOREIGN KEY (channel_id) REFERENCES channels(channel_id)
@@ -178,6 +180,9 @@ class ChannelRepository:
                     reason_json TEXT NOT NULL,
                     scored_at TEXT NOT NULL,
                     scoring_version TEXT NOT NULL,
+                    cadence_score REAL,
+                    videos_per_week_30d REAL,
+                    videos_per_week_90d REAL,
                     FOREIGN KEY (channel_id) REFERENCES channels(channel_id)
                         ON DELETE CASCADE
                 );
@@ -288,6 +293,34 @@ class ChannelRepository:
                     ON video_scores(scored_at);
                 """
             )
+            score_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(channel_scores)").fetchall()
+            }
+            for name in ("cadence_score", "videos_per_week_30d", "videos_per_week_90d"):
+                if name not in score_columns:
+                    connection.execute(f"ALTER TABLE channel_scores ADD COLUMN {name} REAL")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_channel_scores_cadence_30d "
+                "ON channel_scores(videos_per_week_30d)"
+            )
+            discovery_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(channel_discoveries)").fetchall()
+            }
+            if "normalized_keyword" not in discovery_columns:
+                connection.execute("ALTER TABLE channel_discoveries ADD COLUMN normalized_keyword TEXT")
+            legacy_rows = connection.execute(
+                "SELECT rowid, keyword FROM channel_discoveries WHERE normalized_keyword IS NULL OR normalized_keyword = ''"
+            ).fetchall()
+            for row in legacy_rows:
+                connection.execute(
+                    "UPDATE channel_discoveries SET normalized_keyword = ? WHERE rowid = ?",
+                    (normalize_discovery_keyword(row["keyword"]), row["rowid"]),
+                )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_channel_discoveries_normalized_keyword ON channel_discoveries(normalized_keyword)"
+            )
             video_columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(videos)").fetchall()
@@ -347,16 +380,22 @@ class ChannelRepository:
         source: str,
         discovered_at: datetime | None = None,
     ) -> bool:
+        canonical = normalize_discovery_keyword(keyword)
+        if not canonical:
+            raise ValueError("discovery keyword must not be empty")
+        if self.discovery_exists(channel_id, canonical, source):
+            return False
         with self._connect() as connection:
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO channel_discoveries
-                    (channel_id, keyword, source, discovered_at)
-                VALUES (?, ?, ?, ?)
+                    (channel_id, keyword, normalized_keyword, source, discovered_at)
+                VALUES (?, ?, ?, ?, ?)
                 """,
                 (
                     channel_id,
-                    keyword,
+                    canonical,
+                    canonical,
                     source,
                     self._timestamp(discovered_at or datetime.now(timezone.utc)),
                 ),
@@ -383,6 +422,7 @@ class ChannelRepository:
     def list_channels_page(
         self, limit: int, offset: int = 0, search: str | None = None,
         tier: str | None = None, keyword: str | None = None,
+        min_videos_per_week: float | None = None, sort: str = "score",
     ) -> list[dict[str, object]]:
         clauses = ["1=1"]
         parameters: list[object] = []
@@ -394,14 +434,23 @@ class ChannelRepository:
             clauses.append("COALESCE(cs.tier, 'unscored') = ?")
             parameters.append(tier)
         if keyword:
-            clauses.append("EXISTS (SELECT 1 FROM channel_discoveries cd WHERE cd.channel_id = c.channel_id AND lower(trim(cd.keyword)) = lower(trim(?)))")
-            parameters.append(keyword)
+            clauses.append("EXISTS (SELECT 1 FROM channel_discoveries cd WHERE cd.channel_id = c.channel_id AND cd.normalized_keyword = ?)")
+            parameters.append(normalize_discovery_keyword(keyword))
+        if min_videos_per_week is not None:
+            clauses.append("cs.videos_per_week_30d >= ?")
+            parameters.append(min_videos_per_week)
+        order_by = {
+            "score": "cs.score IS NULL, cs.score DESC, c.channel_id",
+            "cadence": "cs.videos_per_week_30d IS NULL, cs.videos_per_week_30d DESC, c.channel_id",
+            "subscribers": "c.subscriber_count IS NULL, c.subscriber_count DESC, c.channel_id",
+        }.get(sort, "cs.score IS NULL, cs.score DESC, c.channel_id")
         parameters.extend((limit, offset))
         with self._connect() as connection:
             rows = connection.execute(
                 f"""
                 SELECT c.*, cs.score AS score, cs.tier AS tier,
                        s.last_success_at, s.next_crawl_at, s.consecutive_failures,
+                       cs.videos_per_week_30d AS videos_per_week_30d,
                        (SELECT COUNT(*) FROM videos v WHERE v.channel_id = c.channel_id) AS observed_videos,
                        (SELECT GROUP_CONCAT(DISTINCT cd.keyword) FROM channel_discoveries cd
                         WHERE cd.channel_id = c.channel_id) AS discovery_keywords
@@ -409,7 +458,7 @@ class ChannelRepository:
                 LEFT JOIN channel_scores cs ON cs.channel_id = c.channel_id
                 LEFT JOIN channel_crawl_state s ON s.channel_id = c.channel_id
                 WHERE {' AND '.join(clauses)}
-                ORDER BY cs.score IS NULL, cs.score DESC, c.channel_id
+                ORDER BY {order_by}
                 LIMIT ? OFFSET ?
                 """,
                 parameters,
@@ -417,7 +466,8 @@ class ChannelRepository:
         return [dict(row) for row in rows]
 
     def count_channels_page(
-        self, search: str | None = None, tier: str | None = None, keyword: str | None = None
+        self, search: str | None = None, tier: str | None = None, keyword: str | None = None,
+        min_videos_per_week: float | None = None,
     ) -> int:
         clauses = ["1=1"]
         parameters: list[object] = []
@@ -429,8 +479,11 @@ class ChannelRepository:
             clauses.append("COALESCE(cs.tier, 'unscored') = ?")
             parameters.append(tier)
         if keyword:
-            clauses.append("EXISTS (SELECT 1 FROM channel_discoveries cd WHERE cd.channel_id = c.channel_id AND lower(trim(cd.keyword)) = lower(trim(?)))")
-            parameters.append(keyword)
+            clauses.append("EXISTS (SELECT 1 FROM channel_discoveries cd WHERE cd.channel_id = c.channel_id AND cd.normalized_keyword = ?)")
+            parameters.append(normalize_discovery_keyword(keyword))
+        if min_videos_per_week is not None:
+            clauses.append("cs.videos_per_week_30d >= ?")
+            parameters.append(min_videos_per_week)
         with self._connect() as connection:
             row = connection.execute(
                 f"SELECT COUNT(*) FROM channels c LEFT JOIN channel_scores cs ON cs.channel_id = c.channel_id WHERE {' AND '.join(clauses)}",
@@ -444,7 +497,7 @@ class ChannelRepository:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT channel_id, keyword, source, discovered_at
+                SELECT channel_id, normalized_keyword AS keyword, source, discovered_at
                 FROM channel_discoveries
                 WHERE channel_id = ?
                 ORDER BY discovered_at, keyword, source
@@ -454,13 +507,14 @@ class ChannelRepository:
         return [self._discovery(row) for row in rows]
 
     def discovery_exists(self, channel_id: str, keyword: str, source: str) -> bool:
+        canonical = normalize_discovery_keyword(keyword)
         with self._connect() as connection:
             row = connection.execute(
                 """
                 SELECT 1 FROM channel_discoveries
-                WHERE channel_id = ? AND keyword = ? AND source = ?
+                WHERE channel_id = ? AND normalized_keyword = ? AND source = ?
                 """,
-                (channel_id, keyword, source),
+                (channel_id, canonical, source),
             ).fetchone()
         return row is not None
 
@@ -502,47 +556,33 @@ class ChannelRepository:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT keyword, COUNT(DISTINCT channel_id) AS count
+                SELECT normalized_keyword, COUNT(DISTINCT channel_id) AS count
                 FROM channel_discoveries
-                GROUP BY keyword
-                ORDER BY count DESC, keyword
+                GROUP BY normalized_keyword
+                ORDER BY count DESC, normalized_keyword
                 """
             ).fetchall()
         return [(str(row[0]), int(row[1])) for row in rows]
-
-    @staticmethod
-    def _normalize_discovery_keyword(keyword: str) -> str:
-        return " ".join(keyword.split()).casefold()
 
     def list_discovery_keyword_summaries(self) -> list[dict[str, object]]:
         """Return normalized keyword provenance summaries for the history UI."""
         with self._connect() as connection:
             rows = connection.execute(
-                """SELECT keyword, channel_id, discovered_at
-                   FROM channel_discoveries ORDER BY discovered_at DESC, keyword"""
+                """SELECT normalized_keyword AS keyword,
+                          COUNT(DISTINCT channel_id) AS channel_count,
+                          MIN(discovered_at) AS first_discovered,
+                          MAX(discovered_at) AS last_discovered
+                   FROM channel_discoveries
+                   GROUP BY normalized_keyword
+                   ORDER BY last_discovered DESC, normalized_keyword"""
             ).fetchall()
-        grouped: dict[str, dict[str, object]] = {}
-        for row in rows:
-            normalized = self._normalize_discovery_keyword(str(row["keyword"]))
-            item = grouped.setdefault(
-                normalized,
-                {"keyword": normalized, "channel_ids": set(), "first_discovered": row["discovered_at"], "last_discovered": row["discovered_at"]},
-            )
-            item["channel_ids"].add(str(row["channel_id"]))
-            timestamp = row["discovered_at"]
-            if timestamp and (not item["first_discovered"] or timestamp < item["first_discovered"]):
-                item["first_discovered"] = timestamp
-            if timestamp and (not item["last_discovered"] or timestamp > item["last_discovered"]):
-                item["last_discovered"] = timestamp
-        summaries = []
-        for item in grouped.values():
-            summaries.append({"keyword": item["keyword"], "channel_count": len(item["channel_ids"]), "first_discovered": item["first_discovered"], "last_discovered": item["last_discovered"]})
-        return sorted(summaries, key=lambda item: (item["last_discovered"] is None, item["last_discovered"] or "", item["keyword"]))[::-1]
+        return [dict(row) for row in rows]
 
     def list_discovery_keywords(self) -> list[str]:
         return [str(item["keyword"]) for item in self.list_discovery_keyword_summaries()]
 
     def list_channels_for_discovery_keyword(self, keyword: str, limit: int, offset: int = 0) -> list[dict[str, object]]:
+        canonical = normalize_discovery_keyword(keyword)
         with self._connect() as connection:
             rows = connection.execute(
                 """SELECT c.*, cs.score, cs.tier,
@@ -550,24 +590,25 @@ class ChannelRepository:
                     MIN(cd.discovered_at) AS first_discovered, MAX(cd.discovered_at) AS last_discovered,
                     (SELECT GROUP_CONCAT(DISTINCT other.keyword) FROM channel_discoveries other
                      WHERE other.channel_id = c.channel_id
-                       AND lower(trim(other.keyword)) <> lower(trim(?))) AS other_keywords
+                       AND other.normalized_keyword <> ?) AS other_keywords
                    FROM channels c
                    JOIN channel_discoveries cd ON cd.channel_id = c.channel_id
                    LEFT JOIN channel_scores cs ON cs.channel_id = c.channel_id
-                   WHERE lower(trim(cd.keyword)) = lower(trim(?))
+                   WHERE cd.normalized_keyword = ?
                    GROUP BY c.channel_id
                    ORDER BY cs.score IS NULL, cs.score DESC, c.channel_id
                    LIMIT ? OFFSET ?""",
-                (keyword, keyword, limit, offset),
+                (canonical, canonical, limit, offset),
             ).fetchall()
         return [dict(row) for row in rows]
 
     def count_channels_for_discovery_keyword(self, keyword: str) -> int:
+        canonical = normalize_discovery_keyword(keyword)
         with self._connect() as connection:
             row = connection.execute(
                 """SELECT COUNT(DISTINCT channel_id) FROM channel_discoveries
-                   WHERE lower(trim(keyword)) = lower(trim(?))""",
-                (keyword,),
+                   WHERE normalized_keyword = ?""",
+                (canonical,),
             ).fetchone()
         return int(row[0])
 
@@ -577,12 +618,14 @@ class ChannelRepository:
         placeholders = ",".join("?" for _ in channel_ids)
         with self._connect() as connection:
             rows = connection.execute(
-                f"SELECT channel_id, keyword FROM channel_discoveries WHERE channel_id IN ({placeholders}) ORDER BY channel_id, keyword",
+                f"SELECT channel_id, normalized_keyword FROM channel_discoveries WHERE channel_id IN ({placeholders}) ORDER BY channel_id, normalized_keyword",
                 channel_ids,
             ).fetchall()
         result = {channel_id: [] for channel_id in channel_ids}
         for row in rows:
-            result[str(row["channel_id"])].append(str(row["keyword"]))
+            keyword = str(row["normalized_keyword"])
+            if keyword not in result[str(row["channel_id"])]:
+                result[str(row["channel_id"])].append(keyword)
         return result
 
     def list_channel_ids_for_keyword(self, keyword: str) -> list[str]:
@@ -590,9 +633,9 @@ class ChannelRepository:
             rows = connection.execute(
                 """
                 SELECT DISTINCT channel_id FROM channel_discoveries
-                WHERE lower(trim(keyword)) = lower(trim(?)) ORDER BY channel_id
+                WHERE normalized_keyword = ? ORDER BY channel_id
                 """,
-                (keyword,),
+                (normalize_discovery_keyword(keyword),),
             ).fetchall()
         return [str(row[0]) for row in rows]
 
@@ -1236,8 +1279,9 @@ class VideoRepository(ChannelRepository):
                 INSERT INTO channel_scores (
                     channel_id, score, relevance_score, activity_score,
                     traction_score, confidence_score, tier, reason_json,
-                    scored_at, scoring_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    scored_at, scoring_version, cadence_score,
+                    videos_per_week_30d, videos_per_week_90d
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(channel_id) DO UPDATE SET
                     score = excluded.score,
                     relevance_score = excluded.relevance_score,
@@ -1247,7 +1291,10 @@ class VideoRepository(ChannelRepository):
                     tier = excluded.tier,
                     reason_json = excluded.reason_json,
                     scored_at = excluded.scored_at,
-                    scoring_version = excluded.scoring_version
+                    scoring_version = excluded.scoring_version,
+                    cadence_score = excluded.cadence_score,
+                    videos_per_week_30d = excluded.videos_per_week_30d,
+                    videos_per_week_90d = excluded.videos_per_week_90d
                 """,
                 (
                     score.channel_id,
@@ -1260,6 +1307,11 @@ class VideoRepository(ChannelRepository):
                     json.dumps(score.reasons, ensure_ascii=False),
                     self._timestamp(score.scored_at),
                     score.scoring_version,
+                    score.cadence_score
+                    if score.cadence_score is not None
+                    else (score.activity_score if score.scoring_version == "v2" else None),
+                    score.videos_per_week_30d,
+                    score.videos_per_week_90d,
                 ),
             )
 
@@ -1276,7 +1328,8 @@ class VideoRepository(ChannelRepository):
         sql = """
             SELECT c.*, s.score AS scored_score, s.relevance_score,
                    s.activity_score, s.traction_score, s.confidence_score,
-                   s.tier, s.reason_json, s.scored_at, s.scoring_version
+                   s.tier, s.reason_json, s.scored_at, s.scoring_version,
+                   s.cadence_score, s.videos_per_week_30d, s.videos_per_week_90d
             FROM channel_scores AS s
             JOIN channels AS c ON c.channel_id = s.channel_id
         """
@@ -1347,6 +1400,15 @@ class VideoRepository(ChannelRepository):
             ).fetchone()
             if row is None:
                 return None
+            published_dates = [
+                datetime.fromisoformat(item[0])
+                for item in connection.execute(
+                    "SELECT published_at FROM videos "
+                    "WHERE channel_id = ? AND published_at IS NOT NULL "
+                    "ORDER BY published_at",
+                    (channel_id,),
+                ).fetchall()
+            ]
             views = [
                 int(item[0])
                 for item in connection.execute(
@@ -1370,6 +1432,7 @@ class VideoRepository(ChannelRepository):
             ),
             "videos_last_30d": int(row["videos_last_30d"]),
             "videos_last_90d": int(row["videos_last_90d"]),
+            "published_dates": published_dates,
             "enriched_videos": int(row["enriched_videos"]),
             "enriched_view_counts": views,
         }
@@ -1389,6 +1452,21 @@ class VideoRepository(ChannelRepository):
             reasons=json.loads(row["reason_json"]),
             scored_at=datetime.fromisoformat(row["scored_at"]),
             scoring_version=row["scoring_version"],
+            cadence_score=(
+                float(row["cadence_score"])
+                if row["cadence_score"] is not None
+                else None
+            ),
+            videos_per_week_30d=(
+                float(row["videos_per_week_30d"])
+                if row["videos_per_week_30d"] is not None
+                else None
+            ),
+            videos_per_week_90d=(
+                float(row["videos_per_week_90d"])
+                if row["videos_per_week_90d"] is not None
+                else None
+            ),
         )
 
     def get_channel_crawl_state(

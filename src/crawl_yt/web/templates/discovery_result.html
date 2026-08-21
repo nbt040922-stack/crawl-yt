@@ -10,6 +10,8 @@
   <div class="summary-card"><span>Existing channels</span><strong>{{ report.existing_channels }}</strong></div>
   <div class="summary-card"><span>New discovery relationships</span><strong>{{ report.new_discovery_relationships }}</strong></div>
   <div class="summary-card"><span>Existing discovery relations</span><strong>{{ report.existing_discovery_relationships }}</strong></div>
+  <div class="summary-card"><span>Channels scored</span><strong>{{ channels_scored }}</strong></div>
+  <div class="summary-card"><span>Scoring failures</span><strong>{{ scoring_failures|length }}</strong></div>
 </section>
 {% if not channels %}
 <p class="notice">No channels found for this keyword.</p>

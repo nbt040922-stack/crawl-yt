@@ -83,21 +83,32 @@ va tiep tuc neu mot channel loi. Khoang lap Phase 2A mac dinh la 24 gio; khong
 co scheduler nen lenh khong tu chay. `crawl-all` duoc giu de tuong thich, con
 `crawl-due` la lua chon van hanh uu tien.
 
-Scoring v1 hoan toan deterministic va chi doc SQLite cuc bo; khong goi YouTube,
-LLM hay dich vu tra phi. `score-channel` tinh mot kenh, `score-all` bat buoc co
-limit, va `top-channels` hien bang xep hang ngan gon. Cong thuc 0-100:
+Channel Scoring v2 hoan toan deterministic va chi doc SQLite cuc bo; khong goi
+YouTube, LLM hay dich vu tra phi. `score-channel` tinh mot kenh, `score-all`
+bat buoc co limit, va `top-channels` hien bang xep hang ngan gon. Cong thuc
+0-100 la relevance 25%, upload cadence 35%, performance/traction 25% va
+confidence/consistency 15%. `activity_score` duoc giu lam cot tuong thich cho
+cadence component; score luu moi co `scoring_version = v2`.
 
-- relevance 35%: so discovery keyword duy nhat, tang co gioi han;
-- activity 30%: video moi nhat va so video trong 30/90 ngay;
-- traction 20%: channel counts va median view cua it nhat 3 video enriched,
+- relevance 25%: so discovery keyword duy nhat voi duong cong tang dan;
+- cadence 35%: toc do upload 30 ngay (60%) va 90 ngay (40%);
+- traction 25%: channel counts va median view cua it nhat 3 video enriched,
   dung log scaling;
-- confidence 15%: coverage metadata, video quan sat, publication date va
-  enriched metadata.
+- confidence/consistency 15%: coverage metadata, video quan sat, publication
+  date, enriched metadata va active-weeks ratio.
+
+Cadence business target: 3-4 video/tuan la good (muc toi thieu mong muon),
+5-6 la very good, 7 la excellent/ideal. Du lieu tren 7 khong tu dong thang:
+duong cong giam dan nhe de upload factory khong vuot channel dang lich deu.
+Neu chua co lich su video, cadence dung neutral 50, confidence thap va
+`score_maturity = preliminary`; co mot phan du lieu la `partial`, du lich su
+du 30/90 ngay va consistency moi la `mature`. Keyword lien quan chi la bang
+chung provenance, chua co semantic clustering.
 
 Tier `high` tu 70, `medium` tu 40, con lai la `low`. Sau mot crawl thanh cong,
 tier quyet dinh lan tiep theo: high 12 gio, medium 24 gio, low 72 gio, unscored
-24 gio. Scoring chi thay doi uu tien; khong xoa channel. Khi activity/traction
-thieu, v1 dung diem neutral va ha confidence thay vi coi NULL la 0.
+24 gio. Scoring chi thay doi uu tien; khong xoa channel. Khi cadence/traction
+thieu, v2 dung cadence neutral va ha confidence thay vi coi NULL la 0.
 
 Discovery expansion dung frontier co uu tien, khong recursion an trong provider.
 Moi run bat buoc co `--max-depth`, `--channel-budget` va `--query-budget`;
@@ -122,6 +133,11 @@ work item cua Phase 2D.
 chi dung caption re cho transcript. Completed item khong chay lai; failed item
 chi duoc thu lai khi co `--retry-failed`. Phase 2D khong thuc thi
 `discovery_expand` trong saved plan va khong bao gio tu bat audio ASR.
+
+Channel scoring duoc tu dong refresh sau discovery tao channel/provenance moi,
+crawl channel thanh cong, va enrichment metadata thanh cong. Batch enrichment
+chi score moi channel mot lan; loi scoring khong lam that bai thao tac chinh.
+Dashboard co the score lai cac channel chua co diem qua form gioi han so luong.
 
 Phase 2E cham diem video bang du lieu local voi scoring version `v1`. Metadata
 priority = 40% recency + 30% channel + 15% traction + 15% confidence.
@@ -223,3 +239,8 @@ thị quan hệ keyword → channel đã được ghi trong database, nên có t
 toàn bộ channel của từng keyword. Channels là thư viện channel chung; một
 channel có thể thuộc nhiều discovery keyword và trang channel hiển thị các
 keyword provenance tương ứng.
+
+Discovery keywords được lưu theo dạng canonical: `Retirement`, ` retirement `
+và `RETIREMENT` được coi là cùng một chủ đề. Chuỗi được trim, gộp whitespace,
+casefold theo Unicode và vẫn giữ nguyên dấu câu; lịch sử hiển thị khóa đã
+normalize để nhất quán.

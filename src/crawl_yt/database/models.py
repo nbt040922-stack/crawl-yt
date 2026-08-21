@@ -56,6 +56,9 @@ class ChannelScore:
     reasons: dict[str, Any]
     scored_at: datetime
     scoring_version: str
+    cadence_score: float | None = None
+    videos_per_week_30d: float | None = None
+    videos_per_week_90d: float | None = None
 
 
 @dataclass(slots=True)

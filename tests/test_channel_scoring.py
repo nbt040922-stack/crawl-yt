@@ -16,6 +16,8 @@ from src.crawl_yt.discovery.channel_scoring import (
     SCORING_VERSION,
     ChannelScoringService,
     CrawlPriorityPolicy,
+    cadence_fit,
+    cadence_score,
     score_tier,
 )
 
@@ -99,6 +101,125 @@ class ChannelScoringTests(unittest.TestCase):
             first.traction_score, first.confidence_score,
         )))
         self.assertEqual(first.scoring_version, SCORING_VERSION)
+
+    def test_v2_version_and_weighted_components_are_explained(self) -> None:
+        self.add_channel("UC1", subscribers=50_000, views=500_000, videos=30, keywords=2)
+        self.add_videos("UC1", list(range(0, 90, 7)), [40_000] * 13)
+        result = self.service.score_channel("UC1", NOW)
+        self.assertEqual(SCORING_VERSION, "v2")
+        self.assertEqual(result.scoring_version, "v2")
+        self.assertAlmostEqual(
+            result.score,
+            round(
+                result.relevance_score * 0.25
+                + result.activity_score * 0.35
+                + result.traction_score * 0.25
+                + result.confidence_score * 0.15,
+                2,
+            ),
+        )
+        self.assertIn("cadence_score", result.reasons)
+        self.assertIn("videos_per_week_30d", result.reasons)
+        self.assertIn("score_maturity", result.reasons)
+
+    def test_cadence_curve_rewards_daily_uploads_without_volume_dominance(self) -> None:
+        anchors = {0: 0, 0.5: 15, 1: 35, 2: 60, 3: 80, 4: 85, 5: 90, 6: 95, 7: 100}
+        for rate, expected in anchors.items():
+            self.assertAlmostEqual(cadence_score(rate), expected, delta=0.01)
+        self.assertGreater(cadence_score(7), cadence_score(4))
+        self.assertGreater(cadence_score(7), cadence_score(3))
+        self.assertLess(cadence_score(8), cadence_score(7))
+        self.assertLess(cadence_score(10), cadence_score(8))
+        self.assertLess(cadence_score(14), cadence_score(10))
+        self.assertEqual(cadence_fit(3), "good")
+        self.assertEqual(cadence_fit(4), "good")
+        self.assertEqual(cadence_fit(5), "very good")
+        self.assertEqual(cadence_fit(6), "very good")
+        self.assertEqual(cadence_fit(7), "excellent")
+
+    def test_recent_and_long_term_cadence_are_both_used(self) -> None:
+        self.add_channel("steady", keywords=1)
+        self.add_channel("recent", keywords=1)
+        self.add_videos("steady", list(range(0, 90, 12)))
+        self.add_videos("recent", list(range(0, 30, 4)) + [60, 75])
+        steady = self.service.score_channel("steady", NOW)
+        recent = self.service.score_channel("recent", NOW)
+        self.assertIn("videos_per_week_30d", steady.reasons)
+        self.assertIn("videos_per_week_90d", steady.reasons)
+        self.assertGreater(recent.reasons["videos_per_week_30d"], steady.reasons["videos_per_week_30d"])
+        self.assertLess(recent.reasons["active_weeks_ratio"], 1.0)
+
+    def test_consistency_rewards_regular_uploads_over_burst(self) -> None:
+        self.add_channel("regular")
+        self.add_channel("burst")
+        self.add_videos("regular", list(range(0, 90, 7)))
+        self.add_videos("burst", [0] * 8 + [60] * 5)
+        regular = self.service.score_channel("regular", NOW)
+        burst = self.service.score_channel("burst", NOW)
+        self.assertGreater(regular.reasons["active_weeks_ratio"], burst.reasons["active_weeks_ratio"])
+        self.assertGreater(regular.confidence_score, burst.confidence_score)
+
+    def test_unknown_cadence_is_neutral_preliminary_not_zero(self) -> None:
+        self.add_channel("new", keywords=1)
+        result = self.service.score_channel("new", NOW)
+        self.assertIsNone(result.reasons["videos_per_week_30d"])
+        self.assertEqual(result.activity_score, 50.0)
+        self.assertEqual(result.reasons["score_maturity"], "preliminary")
+        self.assertLess(result.confidence_score, 40)
+
+    def test_relevance_progression_is_gradual(self) -> None:
+        scores = []
+        for count in (0, 1, 2, 3, 5):
+            channel_id = f"kw-{count}"
+            self.add_channel(channel_id, keywords=count)
+            scores.append(self.service.score_channel(channel_id, NOW).relevance_score)
+        self.assertEqual(scores[0], 0)
+        self.assertEqual(scores[1], 50)
+        self.assertLess(scores[2], 100)
+        self.assertLess(scores[3], scores[4])
+
+    def test_traction_handles_efficiency_and_median_outlier(self) -> None:
+        self.add_channel("efficient", subscribers=50_000)
+        self.add_channel("large", subscribers=2_000_000)
+        self.add_videos("efficient", [1, 2, 3], [40_000, 40_000, 40_000])
+        self.add_videos("large", [1, 2, 3], [20_000, 20_000, 1_000_000_000])
+        efficient = self.service.score_channel("efficient", NOW)
+        large = self.service.score_channel("large", NOW)
+        self.assertEqual(efficient.reasons["median_enriched_views"], 40_000)
+        self.assertGreater(efficient.reasons["view_subscriber_ratio"], 0)
+        self.assertGreater(efficient.traction_score, large.traction_score)
+
+    def test_v2_columns_are_persisted(self) -> None:
+        self.add_channel("UC1")
+        result = self.service.score_channel("UC1", NOW)
+        stored = self.repository.get_channel_score("UC1")
+        self.assertEqual(stored.scoring_version, "v2")
+        self.assertEqual(stored.cadence_score, result.activity_score)
+
+    def test_old_channel_score_schema_gets_additive_cadence_migration(self) -> None:
+        legacy_path = Path(self.temp.name) / "legacy.db"
+        with closing(sqlite3.connect(legacy_path)) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE channels (
+                    channel_id TEXT PRIMARY KEY, title TEXT NOT NULL,
+                    description TEXT, channel_url TEXT, subscriber_count INTEGER,
+                    video_count INTEGER, view_count INTEGER, last_checked_at TEXT
+                );
+                CREATE TABLE channel_scores (
+                    channel_id TEXT PRIMARY KEY, score REAL NOT NULL,
+                    relevance_score REAL NOT NULL, activity_score REAL NOT NULL,
+                    traction_score REAL NOT NULL, confidence_score REAL NOT NULL,
+                    tier TEXT NOT NULL, reason_json TEXT NOT NULL,
+                    scored_at TEXT NOT NULL, scoring_version TEXT NOT NULL
+                );
+                """
+            )
+        migrated = VideoRepository(legacy_path)
+        with closing(sqlite3.connect(legacy_path)) as connection:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(channel_scores)")}
+        self.assertTrue({"cadence_score", "videos_per_week_30d", "videos_per_week_90d"} <= columns)
+        self.assertEqual(migrated.get_channel_score("missing"), None)
 
     def test_multiple_keywords_raise_relevance(self) -> None:
         self.add_channel("UC1", keywords=1)
