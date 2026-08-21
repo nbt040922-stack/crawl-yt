@@ -543,12 +543,16 @@ class VideoRepository(ChannelRepository):
         plan_id: int,
         statuses: tuple[str, ...] | None = None,
         limit: int | None = None,
+        item_types: tuple[str, ...] | None = None,
     ) -> list[WorkItem]:
         sql = "SELECT * FROM work_items WHERE plan_id = ?"
         parameters: list[object] = [plan_id]
         if statuses:
             sql += f" AND status IN ({','.join('?' for _ in statuses)})"
             parameters.extend(statuses)
+        if item_types:
+            sql += f" AND item_type IN ({','.join('?' for _ in item_types)})"
+            parameters.extend(item_types)
         sql += " ORDER BY priority DESC, item_type, target_id, id"
         if limit is not None:
             sql += " LIMIT ?"
@@ -657,7 +661,7 @@ class VideoRepository(ChannelRepository):
                   AND NOT EXISTS (
                     SELECT 1 FROM work_items wi JOIN work_plans wp ON wp.id = wi.plan_id
                     WHERE wi.item_type = 'crawl_channel' AND wi.target_id = c.channel_id
-                      AND wi.status = 'running'
+                      AND wi.status IN ('pending', 'running')
                       AND wp.status IN ('planned', 'running', 'partial')
                   )
                 ORDER BY (
@@ -694,7 +698,7 @@ class VideoRepository(ChannelRepository):
                   AND NOT EXISTS (
                     SELECT 1 FROM work_items wi JOIN work_plans wp ON wp.id = wi.plan_id
                     WHERE wi.item_type = ? AND wi.target_id = v.video_id
-                      AND wi.status = 'running'
+                      AND wi.status IN ('pending', 'running')
                       AND wp.status IN ('planned', 'running', 'partial')
                   )
                 ORDER BY (

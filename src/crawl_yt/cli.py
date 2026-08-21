@@ -489,14 +489,13 @@ def plan_work(
         args.max_crawls,
         args.max_enrichments,
         args.max_transcripts,
-        args.discovery_query_budget,
+        0,
     )
-    plan = OperationalPlanner(_video_repository(repository)).plan(budget, args.seed)
+    plan = OperationalPlanner(_video_repository(repository)).plan(budget)
     print(f"Plan ID: {plan.id}")
     print(f"Crawl channels: {plan.summary['crawl_channel']}")
     print(f"Metadata enrichments: {plan.summary['enrich_video']}")
     print(f"Transcripts: {plan.summary['transcript_video']}")
-    print(f"Discovery expansions: {plan.summary['discovery_expand']}")
     return 0
 
 
@@ -507,12 +506,11 @@ def _print_work_plan(database: VideoRepository, plan) -> None:
         "Budgets: "
         f"crawl={plan.budget.max_channel_crawls}, "
         f"enrichment={plan.budget.max_video_enrichments}, "
-        f"transcript={plan.budget.max_transcripts}, "
-        f"discovery={plan.budget.max_discovery_queries}"
+        f"transcript={plan.budget.max_transcripts}"
     )
     print("Counts:")
-    for item_type, count in plan.summary.items():
-        print(f"  {item_type}: {count}")
+    for item_type in ("crawl_channel", "enrich_video", "transcript_video"):
+        print(f"  {item_type}: {plan.summary.get(item_type, 0)}")
     print("Top items:")
     for item in database.list_work_items(plan.id, limit=10):
         print(
@@ -546,12 +544,12 @@ def work_plans(
     ____: TranscriptProvider | None = None,
     repository: ChannelRepository | None = None,
 ) -> int:
-    print("ID  Status      Crawl  Enrich  Transcript  Discovery")
+    print("ID  Status      Crawl  Enrich  Transcript")
     for plan in _video_repository(repository).list_work_plans(args.limit):
         print(
-            f"{plan.id:<3} {plan.status:<11} {plan.summary['crawl_channel']:>5} "
-            f"{plan.summary['enrich_video']:>7} {plan.summary['transcript_video']:>11} "
-            f"{plan.summary['discovery_expand']:>10}"
+            f"{plan.id:<3} {plan.status:<11} {plan.summary.get('crawl_channel', 0):>5} "
+            f"{plan.summary.get('enrich_video', 0):>7} "
+            f"{plan.summary.get('transcript_video', 0):>11}"
         )
     return 0
 
@@ -873,8 +871,6 @@ def build_parser() -> argparse.ArgumentParser:
     plan_parser.add_argument("--max-crawls", type=nonnegative_int, required=True)
     plan_parser.add_argument("--max-enrichments", type=nonnegative_int, required=True)
     plan_parser.add_argument("--max-transcripts", type=nonnegative_int, required=True)
-    plan_parser.add_argument("--seed", action="append", default=[])
-    plan_parser.add_argument("--discovery-query-budget", type=nonnegative_int, default=0)
     plan_parser.set_defaults(handler=plan_work)
 
     work_plan_parser = subparsers.add_parser("work-plan", help="Chi tiet work plan")

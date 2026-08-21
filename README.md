@@ -34,7 +34,6 @@ python main.py expand "retirement" --max-depth 2 --channel-budget 500 --query-bu
 python main.py discovery-runs --limit 20
 python main.py discovery-run 1
 python main.py plan-work --max-crawls 50 --max-enrichments 100 --max-transcripts 100
-python main.py plan-work --max-crawls 10 --max-enrichments 20 --max-transcripts 20 --seed retirement --discovery-query-budget 1
 python main.py work-plans --limit 20
 python main.py work-plan 1
 python main.py execute-plan 1 --max-items 20
@@ -113,8 +112,8 @@ lich su ngan gon; `discovery-run ID` hien provenance query, depth va ket qua.
 Operational planner tach lap ke hoach khoi thuc thi. `plan-work` chi doc trang
 thai SQLite, xep hang deterministic va ghi snapshot plan; lenh nay khong goi
 YouTube. Ba budget crawl/enrichment/transcript bat buoc khai bao va co the bang
-0. Discovery chi duoc lap ke hoach khi co `--seed`, bi gioi han boi
-`--discovery-query-budget` va khong tu phat minh seed.
+0. Discovery expansion van la lenh `expand` rieng cua Phase 2C, khong phai
+work item cua Phase 2D.
 
 `execute-plan` chay tuan tu, bat buoc `--max-items`, tiep tuc khi mot item loi va
 chi dung caption re cho transcript. Completed item khong chay lai; failed item

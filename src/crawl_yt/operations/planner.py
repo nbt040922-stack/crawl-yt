@@ -27,7 +27,6 @@ class OperationalPlanner:
     def plan(
         self,
         budget: OperationalBudget,
-        seeds: list[str] | None = None,
         now: datetime | None = None,
     ) -> WorkPlan:
         if min(
@@ -48,26 +47,6 @@ class OperationalPlanner:
         items.extend(
             self._video_items("transcript_video", budget.max_transcripts, created_at)
         )
-        seen_seeds: set[str] = set()
-        for seed in seeds or []:
-            normalized = " ".join(seed.split()).casefold()
-            if not normalized or normalized in seen_seeds:
-                continue
-            seen_seeds.add(normalized)
-            if len(seen_seeds) > budget.max_discovery_queries:
-                break
-            items.append(
-                WorkItem(
-                    None,
-                    0,
-                    "discovery_expand",
-                    normalized,
-                    10.0,
-                    "pending",
-                    {"seed": normalized, "query_budget": 1},
-                    created_at,
-                )
-            )
         items.sort(key=lambda item: (-item.priority, item.item_type, item.target_id or ""))
         summary = {
             item_type: sum(item.item_type == item_type for item in items)
@@ -75,7 +54,6 @@ class OperationalPlanner:
                 "crawl_channel",
                 "enrich_video",
                 "transcript_video",
-                "discovery_expand",
             )
         }
         plan = WorkPlan(None, created_at, "planned", budget, summary)
@@ -181,7 +159,12 @@ class WorkPlanExecutor:
         if self.repository.get_work_plan(plan_id) is None:
             raise ValueError(f"work plan {plan_id} not found")
         statuses = ("pending", "failed") if retry_failed else ("pending",)
-        items = self.repository.list_work_items(plan_id, statuses, max_items)
+        items = self.repository.list_work_items(
+            plan_id,
+            statuses,
+            max_items,
+            item_types=("crawl_channel", "enrich_video", "transcript_video"),
+        )
         report = ExecutionReport(plan_id)
         self.repository.update_work_plan_status(plan_id, "running")
         for item in items:
@@ -197,10 +180,6 @@ class WorkPlanExecutor:
                 elif item.item_type == "transcript_video":
                     result = self.transcript_service.transcript(item.target_id)
                     success, error = result.success, result.error
-                else:
-                    self.repository.finish_work_item(item.id, "skipped", "execution not supported")
-                    report.skipped += 1
-                    continue
             except Exception as exception:
                 success, error = False, str(exception)
             if success:

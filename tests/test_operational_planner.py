@@ -97,13 +97,20 @@ class OperationalPlannerTests(unittest.TestCase):
         self.channel("UC2", 60, "medium")
         for number in range(3):
             self.video(f"v{number}", "UC1", number)
-        plan = self.planner.plan(self.budget(1, 2, 1, 1), ["retirement", "retirement"] , NOW)
+        plan = self.planner.plan(self.budget(1, 2, 1, 1), now=NOW)
         self.assertEqual(plan.summary, {
             "crawl_channel": 1, "enrich_video": 2,
-            "transcript_video": 1, "discovery_expand": 1,
+            "transcript_video": 1,
         })
         keys = [(item.item_type, item.target_id) for item in self.repository.list_work_items(plan.id)]
         self.assertEqual(len(keys), len(set(keys)))
+
+    def test_pending_item_in_unfinished_plan_is_not_replanned(self) -> None:
+        self.channel("UC1", 80, "high")
+        first = self.planner.plan(self.budget(crawls=1), now=NOW)
+        second = self.planner.plan(self.budget(crawls=1), now=NOW)
+        self.assertEqual(first.summary["crawl_channel"], 1)
+        self.assertEqual(second.summary["crawl_channel"], 0)
 
     def test_crawl_tier_overdue_and_failure_priorities(self) -> None:
         self.channel("high", 80, "high")
@@ -144,9 +151,18 @@ class OperationalPlannerTests(unittest.TestCase):
         new = self.planner.plan(self.budget(crawls=1), now=NOW)
         self.assertEqual(new.summary["crawl_channel"], 0)
 
+    def test_zero_discovery_budget_creates_no_discovery_work_item(self) -> None:
+        plan = self.planner.plan(self.budget(discovery=0), now=NOW)
+        self.assertNotIn("discovery_expand", plan.summary)
+        self.assertFalse(
+            any(item.item_type == "discovery_expand" for item in self.repository.list_work_items(plan.id))
+        )
+
     def test_deterministic_planning_with_fixed_now(self) -> None:
         self.channel("UC1", 80, "high")
         first = self.planner.plan(self.budget(crawls=1), now=NOW)
+        self.repository.finish_work_item(self.repository.list_work_items(first.id)[0].id, "completed", now=NOW)
+        self.repository.refresh_work_plan_status(first.id)
         second = self.planner.plan(self.budget(crawls=1), now=NOW)
         a = self.repository.list_work_items(first.id)[0]
         b = self.repository.list_work_items(second.id)[0]
@@ -158,7 +174,7 @@ class OperationalPlannerTests(unittest.TestCase):
         self.assertEqual(service.calls, [])
 
     def make_execution_plan(self, targets):
-        plan = WorkPlan(None, NOW, "planned", self.budget(), {"crawl_channel": len(targets), "enrich_video": 0, "transcript_video": 0, "discovery_expand": 0})
+        plan = WorkPlan(None, NOW, "planned", self.budget(), {"crawl_channel": len(targets), "enrich_video": 0, "transcript_video": 0})
         items = [WorkItem(None, 0, "crawl_channel", target, 100-index, "pending", {}, NOW) for index, target in enumerate(targets)]
         self.repository.create_work_plan(plan, items)
         return plan
