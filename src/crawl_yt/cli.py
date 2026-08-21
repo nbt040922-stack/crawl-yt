@@ -315,6 +315,24 @@ def stats(
     return 0
 
 
+def web(
+    args: argparse.Namespace,
+    _: ChannelDiscoveryProvider | None = None,
+    __: ChannelVideoProvider | None = None,
+    ___: VideoMetadataProvider | None = None,
+    ____: TranscriptProvider | None = None,
+    repository: ChannelRepository | None = None,
+) -> int:
+    import uvicorn
+
+    from .web.app import create_app
+
+    print("crawl-yt dashboard")
+    print(f"http://{args.host}:{args.port}")
+    uvicorn.run(create_app(repository=repository), host=args.host, port=args.port)
+    return 0
+
+
 def _channel_id(value: str) -> str:
     if value.startswith("UC"):
         return value
@@ -1001,6 +1019,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     stats_parser = subparsers.add_parser("stats", help="Hien thi thong ke")
     stats_parser.set_defaults(handler=stats)
+
+    web_parser = subparsers.add_parser("web", help="Mo dashboard local")
+    web_parser.add_argument("--host", default="127.0.0.1")
+    web_parser.add_argument("--port", type=positive_int, default=8000)
+    web_parser.set_defaults(handler=web)
     return parser
 
 

@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+{% if kind == 'channel' %}
+<h1>{{ channel.title }}</h1><p>ID: {{ channel.channel_id }} · Subscribers: {{ channel.subscriber_count or '—' }}</p><p>{{ channel.description or '' }}</p>
+<h2>Score</h2><pre>{{ score }}</pre><h2>Discovery provenance</h2><ul>{% for item in discoveries %}<li>{{ item.keyword }} · {{ item.source }}</li>{% endfor %}</ul><h2>Crawl state</h2><pre>{{ state }}</pre>
+<h2>Videos</h2><ul>{% for video in videos %}<li><a href="/videos/{{ video.video_id }}">{{ video.title }}</a></li>{% endfor %}</ul>
+<form method="post" action="/channels/{{ channel.channel_id }}/score"><button>Score Channel</button></form>
+<form method="post" action="/channels/{{ channel.channel_id }}/crawl"><button class="danger">Crawl Incremental (contacts YouTube)</button></form>
+<form method="post" action="/channels/{{ channel.channel_id }}/crawl-full"><label><input name="confirm" type="checkbox" value="true" required> I understand this full crawl may contact YouTube extensively.</label><button class="danger">Crawl Full</button></form>
+{% elif kind == 'video' %}
+<h1>{{ video.title }}</h1><p>Channel: <a href="/channels/{{ video.channel_id }}">{{ video.channel_id }}</a></p><p>Published: {{ video.published_at or '—' }} · Views: {{ video.view_count or '—' }}</p><p>{{ video.description or '' }}</p><h2>Video score</h2><pre>{{ score }}</pre><h2>Transcripts</h2>
+{% for transcript in transcripts %}<article><h3>{{ transcript.language }} · {{ transcript.source }}</h3><pre>{{ transcript.text }}</pre></article>{% else %}<p>No transcript stored.</p>{% endfor %}
+<form method="post" action="/videos/{{ video.video_id }}/score"><button>Score Video</button></form><form method="post" action="/videos/{{ video.video_id }}/enrich"><button class="danger">Enrich Metadata (contacts YouTube)</button></form><form method="post" action="/videos/{{ video.video_id }}/transcript"><button class="danger">Fetch Transcript (caption-only)</button></form>
+{% else %}
+<h1>Work Plan {{ plan.id }}</h1><p>Status: {{ plan.status }}</p><p>Budgets: crawl={{ plan.budget.max_channel_crawls }}, enrich={{ plan.budget.max_video_enrichments }}, transcripts={{ plan.budget.max_transcripts }}</p><table><tr><th>Priority</th><th>Type</th><th>Target</th><th>Status</th><th>Reason</th><th>Error</th></tr>{% for item in items %}<tr><td>{{ item.priority }}</td><td>{{ item.item_type }}</td><td>{{ item.target_id }}</td><td>{{ item.status }}</td><td>{{ item.reasons }}</td><td>{{ item.error_message or '' }}</td></tr>{% endfor %}</table><p class="warning">Execution may contact YouTube.</p><form method="post" action="/work-plans/{{ plan.id }}/execute"><label>Max items <input name="max_items" type="number" min="1" required></label><label><input name="retry_failed" type="checkbox"> Retry failed</label><button>Execute Plan</button></form>
+{% endif %}
+{% endblock %}

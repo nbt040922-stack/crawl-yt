@@ -380,6 +380,62 @@ class ChannelRepository:
             rows = connection.execute(sql, parameters).fetchall()
         return [self._channel(row) for row in rows]
 
+    def list_channels_page(
+        self, limit: int, offset: int = 0, search: str | None = None,
+        tier: str | None = None, keyword: str | None = None,
+    ) -> list[dict[str, object]]:
+        clauses = ["1=1"]
+        parameters: list[object] = []
+        if search:
+            clauses.append("(c.title LIKE ? OR c.channel_id LIKE ?)")
+            pattern = f"%{search}%"
+            parameters.extend((pattern, pattern))
+        if tier:
+            clauses.append("COALESCE(cs.tier, 'unscored') = ?")
+            parameters.append(tier)
+        if keyword:
+            clauses.append("EXISTS (SELECT 1 FROM channel_discoveries cd WHERE cd.channel_id = c.channel_id AND cd.keyword = ?)")
+            parameters.append(keyword)
+        parameters.extend((limit, offset))
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT c.*, cs.score AS score, cs.tier AS tier,
+                       s.last_success_at, s.next_crawl_at, s.consecutive_failures,
+                       (SELECT COUNT(*) FROM videos v WHERE v.channel_id = c.channel_id) AS observed_videos
+                FROM channels c
+                LEFT JOIN channel_scores cs ON cs.channel_id = c.channel_id
+                LEFT JOIN channel_crawl_state s ON s.channel_id = c.channel_id
+                WHERE {' AND '.join(clauses)}
+                ORDER BY cs.score IS NULL, cs.score DESC, c.channel_id
+                LIMIT ? OFFSET ?
+                """,
+                parameters,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def count_channels_page(
+        self, search: str | None = None, tier: str | None = None, keyword: str | None = None
+    ) -> int:
+        clauses = ["1=1"]
+        parameters: list[object] = []
+        if search:
+            clauses.append("(c.title LIKE ? OR c.channel_id LIKE ?)")
+            pattern = f"%{search}%"
+            parameters.extend((pattern, pattern))
+        if tier:
+            clauses.append("COALESCE(cs.tier, 'unscored') = ?")
+            parameters.append(tier)
+        if keyword:
+            clauses.append("EXISTS (SELECT 1 FROM channel_discoveries cd WHERE cd.channel_id = c.channel_id AND cd.keyword = ?)")
+            parameters.append(keyword)
+        with self._connect() as connection:
+            row = connection.execute(
+                f"SELECT COUNT(*) FROM channels c LEFT JOIN channel_scores cs ON cs.channel_id = c.channel_id WHERE {' AND '.join(clauses)}",
+                parameters,
+            ).fetchone()
+        return int(row[0])
+
     def list_discoveries_for_channel(
         self, channel_id: str
     ) -> list[ChannelDiscovery]:
@@ -647,6 +703,19 @@ class VideoRepository(ChannelRepository):
                 "SELECT * FROM work_plans ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
         return [self._work_plan(row) for row in rows]
+
+    def list_work_plans_page(self, limit: int, offset: int = 0) -> list[WorkPlan]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM work_plans ORDER BY id DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+        return [self._work_plan(row) for row in rows]
+
+    def count_work_plans(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute("SELECT COUNT(*) FROM work_plans").fetchone()
+        return int(row[0])
 
     def list_work_items(
         self,
@@ -1467,6 +1536,63 @@ class VideoRepository(ChannelRepository):
     def count_videos(self) -> int:
         with self._connect() as connection:
             row = connection.execute("SELECT COUNT(*) FROM videos").fetchone()
+        return int(row[0])
+
+    def list_videos_page(
+        self, limit: int, offset: int = 0, channel_id: str | None = None,
+        tier: str | None = None, metadata_pending: bool = False,
+        transcript_pending: bool = False,
+    ) -> list[dict[str, object]]:
+        clauses = ["1=1"]
+        parameters: list[object] = []
+        if channel_id:
+            clauses.append("v.channel_id = ?")
+            parameters.append(channel_id)
+        if tier:
+            clauses.append("COALESCE(s.tier, 'unscored') = ?")
+            parameters.append(tier)
+        if metadata_pending:
+            clauses.append("v.metadata_enriched_at IS NULL")
+        if transcript_pending:
+            clauses.append("NOT EXISTS (SELECT 1 FROM transcripts t WHERE t.video_id = v.video_id)")
+        parameters.extend((limit, offset))
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT v.*, c.title AS channel_title, s.score, s.tier,
+                       s.recency_score, s.transcript_value_score,
+                       EXISTS (SELECT 1 FROM transcripts t WHERE t.video_id = v.video_id) AS transcript_present
+                FROM videos v JOIN channels c ON c.channel_id = v.channel_id
+                LEFT JOIN video_scores s ON s.video_id = v.video_id
+                WHERE {' AND '.join(clauses)}
+                ORDER BY s.score IS NULL, s.score DESC, v.published_at DESC, v.video_id
+                LIMIT ? OFFSET ?
+                """,
+                parameters,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def count_videos_page(
+        self, channel_id: str | None = None, tier: str | None = None,
+        metadata_pending: bool = False, transcript_pending: bool = False,
+    ) -> int:
+        clauses = ["1=1"]
+        parameters: list[object] = []
+        if channel_id:
+            clauses.append("v.channel_id = ?")
+            parameters.append(channel_id)
+        if tier:
+            clauses.append("COALESCE(s.tier, 'unscored') = ?")
+            parameters.append(tier)
+        if metadata_pending:
+            clauses.append("v.metadata_enriched_at IS NULL")
+        if transcript_pending:
+            clauses.append("NOT EXISTS (SELECT 1 FROM transcripts t WHERE t.video_id = v.video_id)")
+        with self._connect() as connection:
+            row = connection.execute(
+                f"SELECT COUNT(*) FROM videos v LEFT JOIN video_scores s ON s.video_id = v.video_id WHERE {' AND '.join(clauses)}",
+                parameters,
+            ).fetchone()
         return int(row[0])
 
     def count_videos_for_channel(self, channel_id: str) -> int:

@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ title }}</h1>
+{% if page_kind == 'channels' %}
+<form method="get"><input name="search" placeholder="Search channels"><select name="tier"><option value="">All tiers</option><option>high</option><option>medium</option><option>low</option><option>unscored</option></select><button>Filter</button></form>
+<table><tr><th>Channel</th><th>Score</th><th>Tier</th><th>Subscribers</th><th>Videos</th><th>Last crawl</th><th>Next crawl</th><th>Failures</th></tr>{% for row in rows %}<tr><td><a href="/channels/{{ row.channel_id }}">{{ row.title }}</a></td><td>{{ row.score or '—' }}</td><td>{{ row.tier or 'unscored' }}</td><td>{{ row.subscriber_count or '—' }}</td><td>{{ row.observed_videos }}</td><td>{{ row.last_success_at or '—' }}</td><td>{{ row.next_crawl_at or '—' }}</td><td>{{ row.consecutive_failures or 0 }}</td></tr>{% endfor %}</table>
+{% elif page_kind == 'videos' %}
+<table><tr><th>Priority</th><th>Tier</th><th>Title</th><th>Channel</th><th>Published</th><th>Views</th><th>Metadata</th><th>Transcript</th></tr>{% for row in rows %}<tr><td>{{ row.score or '—' }}</td><td>{{ row.tier or 'unscored' }}</td><td><a href="/videos/{{ row.video_id }}">{{ row.title }}</a></td><td>{{ row.channel_title }}</td><td>{{ row.published_at or '—' }}</td><td>{{ row.view_count or '—' }}</td><td>{{ 'enriched' if row.metadata_enriched_at else 'pending' }}</td><td>{{ 'stored' if row.transcript_present else 'pending' }}</td></tr>{% endfor %}</table>
+{% else %}
+<p><a href="/work-plans/new">Create Work Plan</a></p><table><tr><th>ID</th><th>Created</th><th>Status</th><th>Crawl</th><th>Enrich</th><th>Transcript</th></tr>{% for row in rows %}<tr><td><a href="/work-plans/{{ row.id }}">{{ row.id }}</a></td><td>{{ row.created_at }}</td><td>{{ row.status }}</td><td>{{ row.summary.get('crawl_channel', 0) }}</td><td>{{ row.summary.get('enrich_video', 0) }}</td><td>{{ row.summary.get('transcript_video', 0) }}</td></tr>{% endfor %}</table>
+{% endif %}
+<p>Page {{ page }} · {{ total }} total</p>
+{% endblock %}
