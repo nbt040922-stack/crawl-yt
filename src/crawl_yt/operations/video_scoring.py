@@ -60,7 +60,7 @@ class VideoScoringService:
             recency * 0.30
             + channel * 0.30
             + traction * 0.20
-            + (100.0 if metadata_present else 25.0) * 0.10
+            + metadata_value * 0.10
             + self._confidence(video, inputs) * 0.10
         )
         confidence = self._confidence(video, inputs)

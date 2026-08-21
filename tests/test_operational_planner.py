@@ -22,6 +22,7 @@ from src.crawl_yt.database.models import (
 )
 from src.crawl_yt.database.repository import VideoRepository
 from src.crawl_yt.operations.planner import OperationalPlanner, WorkPlanExecutor
+from src.crawl_yt.operations.video_scoring import VideoScoringService
 
 
 NOW = datetime(2026, 8, 14, 12, tzinfo=timezone.utc)
@@ -141,11 +142,31 @@ class OperationalPlannerTests(unittest.TestCase):
         self.video("second", "UC1", 10)
         for video_id, priority in (("first", 20.0), ("second", 95.0)):
             self.repository.upsert_video_score(
-                VideoScore(video_id, priority, 50, 50, 50, priority, priority, 80, "high", "{}", NOW, "v1")
+                VideoScore(video_id, priority, 50, 50, 50, priority, priority, 80, "high", '{"metadata_priority": ' + str(priority) + ', "transcript_priority": 50}', NOW, "v1")
             )
         plan = self.planner.plan(self.budget(enrichments=2), now=NOW)
         items = self.repository.list_work_items(plan.id)
         self.assertEqual([item.target_id for item in items], ["second", "first"])
+
+    def test_candidate_pool_scores_multiplier_not_entire_database(self) -> None:
+        self.channel("UC1", 50, "medium")
+        for number in range(10):
+            self.video(f"pool-{number}", "UC1", number)
+
+        class CountingScorer(VideoScoringService):
+            def __init__(self, repository):
+                super().__init__(repository)
+                self.calls = []
+
+            def score_video(self, video_id, now=None, force=False):
+                self.calls.append(video_id)
+                return super().score_video(video_id, now, force)
+
+        scorer = CountingScorer(self.repository)
+        planner = OperationalPlanner(self.repository, scorer, candidate_pool_multiplier=3)
+        plan = planner.plan(self.budget(enrichments=2), now=NOW)
+        self.assertEqual(len(scorer.calls), 6)
+        self.assertEqual(plan.summary["enrich_video"], 2)
 
     def test_enriched_video_gets_transcript_bonus(self) -> None:
         self.channel("UC1", 50, "medium")

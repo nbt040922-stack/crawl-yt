@@ -14,6 +14,7 @@ from src.crawl_yt.database.models import Channel, ChannelScore, Video
 from src.crawl_yt.database.repository import VideoRepository
 from src.crawl_yt.operations.video_scoring import (
     RECENCY_BUCKETS,
+    _tier,
     VideoScoringService,
 )
 
@@ -55,6 +56,8 @@ class VideoScoringTests(unittest.TestCase):
         with self.repository._connect() as connection:
             tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             self.assertIn("video_scores", tables)
+            indexes = {row[1] for row in connection.execute("PRAGMA index_list(video_scores)")}
+            self.assertTrue({"idx_video_scores_score", "idx_video_scores_tier", "idx_video_scores_scored_at"} <= indexes)
             with self.assertRaises(sqlite3.IntegrityError):
                 connection.execute(
                     "INSERT INTO video_scores (video_id,score,recency_score,channel_score,traction_score,metadata_value_score,transcript_value_score,confidence_score,tier,reason_json,scored_at,scoring_version) VALUES ('missing',1,1,1,1,1,1,1,'low','{}',?, 'v1')",
@@ -62,12 +65,34 @@ class VideoScoringTests(unittest.TestCase):
                 )
         self.assertEqual(self.repository.get_video_score("v1"), score)
 
+    def test_fk_cascade_removes_video_score(self) -> None:
+        self.add_video()
+        self.service.score_video("v1", NOW)
+        with self.repository._connect() as connection:
+            connection.execute("DELETE FROM videos WHERE video_id = 'v1'")
+        self.assertIsNone(self.repository.get_video_score("v1"))
+
     def test_recency_buckets_and_missing_date(self) -> None:
         for days, expected in RECENCY_BUCKETS[:-1]:
             self.add_video(f"v{days}", days)
             self.assertEqual(self.service.score_video(f"v{days}", NOW).recency_score, expected)
+        self.add_video("old", 91)
+        self.assertEqual(self.service.score_video("old", NOW).recency_score, 10.0)
         self.add_video("missing", None)
         self.assertEqual(self.service.score_video("missing", NOW).recency_score, 50.0)
+
+    def test_zero_views_zero_subscribers_and_viral_cap(self) -> None:
+        self.repository.upsert_channel(Channel("UC1", "Channel", subscriber_count=0))
+        self.add_video("zero", 2, 0)
+        self.add_video("viral", 2, 10**12)
+        zero = self.service.score_video("zero", NOW)
+        viral = self.service.score_video("viral", NOW)
+        self.assertEqual(zero.traction_score, 0.0)
+        self.assertLessEqual(viral.traction_score, 100.0)
+        self.assertGreater(viral.traction_score, zero.traction_score)
+
+    def test_video_tier_boundaries(self) -> None:
+        self.assertEqual((_tier(70), _tier(40), _tier(39.999)), ("high", "medium", "low"))
 
     def test_formula_signals_reason_and_version(self) -> None:
         self.add_channel_score()
@@ -82,6 +107,13 @@ class VideoScoringTests(unittest.TestCase):
         self.assertEqual(reason["transcript_present"], False)
         self.assertEqual(reason["view_count"], 183_000)
         self.assertIn("metadata_priority", reason)
+
+    def test_priority_weights_use_metadata_value_for_transcript(self) -> None:
+        self.add_video("weighted", days=0, views=None, enriched=False)
+        score = self.service.score_video("weighted", NOW)
+        reason = json.loads(score.reason_json)
+        self.assertAlmostEqual(reason["metadata_priority"], 70.3, places=1)
+        self.assertAlmostEqual(reason["transcript_priority"], 68.45, places=1)
 
     def test_missing_data_is_neutral_and_scores_are_clamped(self) -> None:
         self.add_video("missing", None, None)

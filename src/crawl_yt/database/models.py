@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -156,6 +157,14 @@ class VideoScore:
     reason_json: str
     scored_at: datetime
     scoring_version: str
+
+    @property
+    def metadata_priority(self) -> float:
+        return float(json.loads(self.reason_json).get("metadata_priority", self.score))
+
+    @property
+    def transcript_priority(self) -> float:
+        return float(json.loads(self.reason_json).get("transcript_priority", self.transcript_value_score))
 
 
 @dataclass(slots=True)

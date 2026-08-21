@@ -105,15 +105,15 @@ class OperationalPlanner:
         for row in self.repository.list_video_work_candidates(item_type, pool_limit, now):
             score = self.video_scorer.score_video(str(row["video_id"]), now)
             priority = (
-                score.score
+                score.metadata_priority
                 if item_type == "enrich_video"
-                else score.transcript_value_score
+                else score.transcript_priority
             )
             reasons = {
                 "video_score": score.score,
                 "video_tier": score.tier,
-                "metadata_priority": score.score,
-                "transcript_priority": score.transcript_value_score,
+                "metadata_priority": score.metadata_priority,
+                "transcript_priority": score.transcript_priority,
                 "confidence": score.confidence_score,
             }
             if item_type == "enrich_video":
