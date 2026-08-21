@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Full Crawl Batch #{{ batch.id }}</h1>
+<p><a href="/channels">Back to Channels</a> · <a href="/crawl-batches">Crawl batches</a></p>
+<p>Status: <strong>{{ batch.status }}</strong></p>
+<p>Filters: {{ batch.filter_json }}</p>
+<p>Requested limit: {{ batch.requested_limit }} · Candidate channels: {{ batch.candidate_count }} · Selected channels: {{ batch.selected_count }}</p>
+<p>Success: {{ batch.success_count }} · Failed: {{ batch.failure_count }} · Pending: {{ batch.pending_count }}</p>
+<p>Progress: {{ batch.success_count + batch.failure_count }} / {{ batch.selected_count }} completed</p>
+{% if batch.pending_count %}<form method="post" action="/crawl-batches/{{ batch.id }}/run-next"><label>Run next <select name="chunk_size"><option value="1">1</option><option value="5" selected>5</option><option value="10">10</option><option value="20">20</option></select></label><button>Run next</button></form>{% endif %}
+{% if batch.failure_count %}<form method="post" action="/crawl-batches/{{ batch.id }}/retry-failed"><button>Retry failed</button></form>{% endif %}
+<table><tr><th>Channel</th><th>Position</th><th>Status</th><th>Started</th><th>Finished</th><th>Error</th></tr>{% for item in items %}<tr><td><a href="/channels/{{ item.channel_id }}">{{ titles[item.channel_id] }}</a></td><td>{{ item.position }}</td><td>{{ item.status }}</td><td>{{ item.started_at or '—' }}</td><td>{{ item.finished_at or '—' }}</td><td>{{ item.error_message or '' }}</td></tr>{% endfor %}</table>
+{% endblock %}

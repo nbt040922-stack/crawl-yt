@@ -124,6 +124,37 @@ class WorkItem:
 
 
 @dataclass(slots=True)
+class CrawlBatch:
+    id: int
+    created_at: datetime
+    status: str
+    crawl_mode: str
+    requested_limit: int
+    candidate_count: int
+    selected_count: int
+    success_count: int
+    failure_count: int
+    pending_count: int
+    filter_json: dict[str, Any]
+    sort: str
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    last_error: str | None = None
+
+
+@dataclass(slots=True)
+class CrawlBatchItem:
+    id: int
+    batch_id: int
+    channel_id: str
+    position: int
+    status: str
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    error_message: str | None = None
+
+
+@dataclass(slots=True)
 class Video:
     video_id: str
     channel_id: str

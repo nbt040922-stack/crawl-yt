@@ -24,6 +24,7 @@ from ..database.repository import TranscriptRepository, VideoRepository
 from ..discovery.channel_discovery import DiscoveryService
 from ..discovery.ytdlp_provider import YtDlpDiscoveryProvider
 from ..operations.planner import OperationalPlanner, WorkPlanExecutor
+from ..operations.crawl_batch import CrawlBatchService
 from ..operations.video_scoring import VideoScoringService
 from ..transcripts.provider import TranscriptService
 from ..transcripts.ytdlp_provider import YtDlpTranscriptProvider
@@ -164,6 +165,67 @@ def create_app(
         slug = re.sub(r"[^a-z0-9]+", "-", (keyword or "channels").strip().lower()).strip("-") or "channels"
         filename = f"crawl-yt-{slug}-score-{min_score:g}.xlsx"
         return StreamingResponse(stream, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+    @app.post("/channels/full-crawl-batch")
+    def create_full_crawl_batch(
+        request: Request,
+        limit: str = Form("100"),
+        search: str | None = Form(None), tier: str | None = Form(None),
+        keyword: str | None = Form(None), min_videos_per_week: str | None = Form(None),
+        min_score: str | None = Form(None), sort: str = Form("score"),
+        confirmation: bool = Form(False),
+    ) -> RedirectResponse:
+        if not confirmation:
+            raise HTTPException(400, "Confirmation is required before creating a full crawl batch.")
+        try:
+            requested_limit = int(limit)
+        except (TypeError, ValueError) as error:
+            raise HTTPException(400, "limit must be a whole number") from error
+        if not 1 <= requested_limit <= 1000:
+            raise HTTPException(400, "limit must be between 1 and 1000")
+        filters = {
+            "search": search.strip() if search and search.strip() else None,
+            "tier": tier or None,
+            "keyword": keyword.strip() if keyword and keyword.strip() else None,
+            "min_videos_per_week": _parse_optional_float(min_videos_per_week, "minimum videos/week", minimum=0),
+            "min_score": _parse_optional_float(min_score, "minimum score", minimum=0, maximum=100),
+        }
+        if sort not in {"score", "cadence", "subscribers"}:
+            sort = "score"
+        batch = CrawlBatchService(database).create(filters, sort, requested_limit)
+        return RedirectResponse(f"/crawl-batches/{batch.id}", status_code=303)
+
+    @app.get("/crawl-batches", response_class=HTMLResponse)
+    def crawl_batches(request: Request, page: int = 1, per_page: int = 20) -> HTMLResponse:
+        per_page = min(max(per_page, 1), 100)
+        page = max(page, 1)
+        rows = database.list_crawl_batches(per_page, (page - 1) * per_page)
+        return render(request, "crawl_batch_list.html", title="Crawl batches", rows=rows, page=page, per_page=per_page)
+
+    @app.get("/crawl-batches/{batch_id}", response_class=HTMLResponse)
+    def crawl_batch_detail(request: Request, batch_id: int) -> HTMLResponse:
+        batch = database.get_crawl_batch(batch_id)
+        if batch is None:
+            raise HTTPException(404, "Crawl batch not found")
+        items = database.list_crawl_batch_items(batch_id)
+        titles = {item.channel_id: (database.get_channel(item.channel_id).title if database.get_channel(item.channel_id) else item.channel_id) for item in items}
+        return render(request, "crawl_batch_detail.html", title=f"Full Crawl Batch #{batch_id}", batch=batch, items=items, titles=titles)
+
+    @app.post("/crawl-batches/{batch_id}/run-next")
+    def run_crawl_batch_next(batch_id: int, chunk_size: int = Form(5)) -> RedirectResponse:
+        try:
+            CrawlBatchService(database, video_provider=video_provider).run_next(batch_id, chunk_size)
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
+        return RedirectResponse(f"/crawl-batches/{batch_id}", status_code=303)
+
+    @app.post("/crawl-batches/{batch_id}/retry-failed")
+    def retry_crawl_batch_failed(batch_id: int) -> RedirectResponse:
+        try:
+            CrawlBatchService(database, video_provider=video_provider).retry_failed(batch_id)
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
+        return RedirectResponse(f"/crawl-batches/{batch_id}", status_code=303)
 
     @app.get("/channels/{channel_id}", response_class=HTMLResponse)
     def channel_detail(request: Request, channel_id: str) -> HTMLResponse:

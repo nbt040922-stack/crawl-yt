@@ -43,6 +43,14 @@ class VideoFake:
         return [self.video] if self.video else []
 
 
+class BatchFailureFake(VideoFake):
+    def iterate_videos(self, channel_id, limit=None):
+        self.calls.append((channel_id, limit))
+        if channel_id == "UC1":
+            raise RuntimeError("provider failed")
+        return []
+
+
 class MetadataFake:
     def __init__(self):
         self.calls = []
@@ -93,6 +101,64 @@ class WebTests(unittest.TestCase):
         self.assertIn("Video one", self.client.get("/videos").text)
         self.assertEqual(self.client.get("/work-plans").status_code, 200)
 
+    def test_full_crawl_batch_creation_uses_filters_and_confirmation(self) -> None:
+        response = self.client.post("/channels/full-crawl-batch", data={"limit": "1", "keyword": "retirement"})
+        self.assertEqual(response.status_code, 400)
+        provider = VideoFake()
+        client = TestClient(create_app(repository=self.repository, video_provider=provider))
+        response = client.post("/channels/full-crawl-batch", data={"limit": "1", "keyword": "retirement", "confirmation": "true"}, follow_redirects=False)
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(provider.calls, [])
+        batch = self.repository.get_crawl_batch(1)
+        self.assertEqual(batch.candidate_count, 2)
+        self.assertEqual(batch.selected_count, 1)
+        self.assertEqual(self.repository.list_crawl_batch_items(1)[0].channel_id, "UC1")
+
+    def test_full_crawl_batch_creation_limit_and_pagination_are_independent(self) -> None:
+        repo = TranscriptRepository(Path(self.temp.name) / "batch-many.db")
+        for number in range(81):
+            channel_id = f"B{number:03d}"
+            repo.upsert_channel(Channel(channel_id, f"Batch {number:03d}"))
+            repo.record_discovery(channel_id, "retirement", "seed")
+        client = TestClient(create_app(repository=repo))
+        response = client.post("/channels/full-crawl-batch?page=2&per_page=25", data={"limit": "50", "keyword": "retirement", "confirmation": "true"}, follow_redirects=False)
+        self.assertEqual(response.status_code, 303)
+        batch = repo.get_crawl_batch(1)
+        self.assertEqual((batch.candidate_count, batch.selected_count), (81, 50))
+        self.assertEqual(repo.list_crawl_batch_items(1)[0].channel_id, "B000")
+
+    def test_full_crawl_batch_run_next_is_chunked_and_failures_continue(self) -> None:
+        provider = VideoFake(Video("batch-video", "UC1", "Batch video", datetime.now(timezone.utc)))
+        client = TestClient(create_app(repository=self.repository, video_provider=provider))
+        created = client.post("/channels/full-crawl-batch", data={"limit": "2", "confirmation": "true"}, follow_redirects=False)
+        self.assertEqual(created.status_code, 303)
+        detail = client.post("/crawl-batches/1/run-next", data={"chunk_size": "1"}, follow_redirects=False)
+        self.assertEqual(detail.status_code, 303)
+        batch = self.repository.get_crawl_batch(1)
+        self.assertEqual(batch.success_count, 1)
+        self.assertEqual(batch.pending_count, 1)
+        client.post("/crawl-batches/1/run-next", data={"chunk_size": "20"})
+        batch = self.repository.get_crawl_batch(1)
+        self.assertEqual(batch.status, "completed")
+        self.assertEqual(batch.success_count, 2)
+        self.assertEqual(provider.calls, [("UC1", None), ("UC2", None)])
+
+    def test_full_crawl_batch_failure_does_not_stop_and_retry_is_explicit(self) -> None:
+        provider = BatchFailureFake()
+        client = TestClient(create_app(repository=self.repository, video_provider=provider))
+        client.post("/channels/full-crawl-batch", data={"limit": "2", "confirmation": "true"})
+        client.post("/crawl-batches/1/run-next", data={"chunk_size": "5"})
+        batch = self.repository.get_crawl_batch(1)
+        self.assertEqual(batch.status, "completed_with_errors")
+        self.assertEqual((batch.success_count, batch.failure_count), (1, 1))
+        self.assertEqual(self.repository.list_crawl_batch_items(1)[0].status, "failed")
+        client.post("/crawl-batches/1/retry-failed")
+        self.assertEqual(self.repository.list_crawl_batch_items(1)[0].status, "pending")
+
+    def test_crawl_batch_history_and_detail_are_read_only(self) -> None:
+        self.assertEqual(self.client.get("/crawl-batches").status_code, 200)
+        self.assertEqual(self.client.get("/crawl-batches/999").status_code, 404)
+
     def test_channels_default_pagination_and_valid_page_sizes(self) -> None:
         repo = TranscriptRepository(Path(self.temp.name) / "many.db")
         for number in range(81):
@@ -135,9 +201,11 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.repository.count_channels_page(keyword=" RETIREMENT "), 2)
         self.assertEqual(len(self.repository.list_channels_page(50, keyword="RETIREMENT")), 2)
 
-    def test_channels_page_exposes_bounded_score_unscored_action(self) -> None:
+    def test_channels_page_exposes_full_crawl_batch_action(self) -> None:
         response = self.client.get("/channels")
-        self.assertIn('action="/channels/score-unscored"', response.text)
+        self.assertIn('action="/channels/full-crawl-batch"', response.text)
+        self.assertIn("Create Full Crawl Batch", response.text)
+        self.assertNotIn('action="/channels/score-unscored"', response.text)
         self.assertIn('name="limit"', response.text)
 
     def test_score_unscored_requires_positive_limit_and_updates_scores(self) -> None:

@@ -248,3 +248,9 @@ và `RETIREMENT` được coi là cùng một chủ đề. Chuỗi được trim
 casefold theo Unicode và vẫn giữ nguyên dấu câu; lịch sử hiển thị khóa đã
 normalize để nhất quán.
 Trang Channels co nut Export Excel. Bang export tuan theo cac filter hien tai, khong bi gioi han boi pagination. Score mac dinh la 60.
+
+Manual Full Crawl: tren Channels, chon filter, nhap limit (1-1000), tick xác nhận
+và tạo batch. Batch đóng băng danh sách channel tại thời điểm tạo; dùng Run next
+để crawl tuần tự từng chunk (1-20). Mỗi channel luôn chạy full crawl, không phụ
+thuộc trạng thái due hay lịch sử crawl. Kết quả thành công tự động cập nhật score
+và lịch crawl; lỗi có thể retry thủ công từ trang chi tiết batch.

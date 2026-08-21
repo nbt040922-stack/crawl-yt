@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ title }}</h1>
+<p><a href="/channels">Back to Channels</a></p>
+<table><tr><th>ID</th><th>Created</th><th>Mode</th><th>Selected</th><th>Success</th><th>Failed</th><th>Pending</th><th>Status</th></tr>{% for batch in rows %}<tr><td><a href="/crawl-batches/{{ batch.id }}">{{ batch.id }}</a></td><td>{{ batch.created_at }}</td><td>{{ batch.crawl_mode }}</td><td>{{ batch.selected_count }}</td><td>{{ batch.success_count }}</td><td>{{ batch.failure_count }}</td><td>{{ batch.pending_count }}</td><td>{{ batch.status }}</td></tr>{% else %}<tr><td colspan="8">No crawl batches yet.</td></tr>{% endfor %}</table>
+{% endblock %}

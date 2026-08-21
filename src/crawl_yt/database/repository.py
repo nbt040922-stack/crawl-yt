@@ -14,6 +14,8 @@ from .models import (
     ChannelCrawlState,
     ChannelScore,
     ChannelDiscovery,
+    CrawlBatch,
+    CrawlBatchItem,
     DiscoveryQuery,
     DiscoveryRun,
     OperationalBudget,
@@ -294,6 +296,35 @@ class ChannelRepository:
                     ON video_scores(tier);
                 CREATE INDEX IF NOT EXISTS idx_video_scores_scored_at
                     ON video_scores(scored_at);
+                CREATE TABLE IF NOT EXISTS crawl_batches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    status TEXT NOT NULL CHECK (status IN ('pending','running','completed','completed_with_errors','failed','cancelled')),
+                    crawl_mode TEXT NOT NULL CHECK (crawl_mode = 'full'),
+                    requested_limit INTEGER NOT NULL,
+                    candidate_count INTEGER NOT NULL,
+                    selected_count INTEGER NOT NULL,
+                    filter_json TEXT NOT NULL,
+                    sort TEXT NOT NULL,
+                    last_error TEXT
+                );
+                CREATE TABLE IF NOT EXISTS crawl_batch_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    batch_id INTEGER NOT NULL,
+                    channel_id TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('pending','running','success','failed')),
+                    started_at TEXT,
+                    finished_at TEXT,
+                    error_message TEXT,
+                    FOREIGN KEY (batch_id) REFERENCES crawl_batches(id) ON DELETE CASCADE,
+                    FOREIGN KEY (channel_id) REFERENCES channels(channel_id) ON DELETE CASCADE,
+                    UNIQUE (batch_id, channel_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_crawl_batch_items_batch_status
+                    ON crawl_batch_items(batch_id, status, position);
                 """
             )
             score_columns = {
@@ -567,6 +598,119 @@ class ChannelRepository:
             raise ValueError("Export matches more than 50,000 channels. Narrow your filters.")
         return [dict(row) for row in rows]
 
+    def create_crawl_batch(
+        self, filters: dict[str, object], sort: str, requested_limit: int
+    ) -> CrawlBatch:
+        if not 1 <= requested_limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        min_score = filters.get("min_score")
+        min_videos = filters.get("min_videos_per_week")
+        candidate_count = self.count_channels_page(
+            filters.get("search"), filters.get("tier"), filters.get("keyword"),
+            min_videos, min_score,
+        )
+        rows = self.list_channels_for_export(
+            search=filters.get("search"), tier=filters.get("tier"),
+            keyword=filters.get("keyword"), min_videos_per_week=min_videos,
+            min_score=min_score, sort=sort, max_rows=MAX_CHANNEL_EXPORT_ROWS,
+        )[:requested_limit]
+        now = datetime.now(timezone.utc)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """INSERT INTO crawl_batches
+                   (created_at, status, crawl_mode, requested_limit, candidate_count,
+                    selected_count, filter_json, sort)
+                   VALUES (?, 'pending', 'full', ?, ?, ?, ?, ?)""",
+                (self._timestamp(now), requested_limit, candidate_count, len(rows), json.dumps(filters), sort),
+            )
+            batch_id = int(cursor.lastrowid)
+            connection.executemany(
+                """INSERT INTO crawl_batch_items
+                   (batch_id, channel_id, position, status) VALUES (?, ?, ?, 'pending')""",
+                [(batch_id, row["channel_id"], position) for position, row in enumerate(rows, 1)],
+            )
+        return self.get_crawl_batch(batch_id)
+
+    def get_crawl_batch(self, batch_id: int) -> CrawlBatch | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM crawl_batches WHERE id = ?", (batch_id,)).fetchone()
+            if row is None:
+                return None
+            counts = connection.execute(
+                "SELECT status, COUNT(*) AS count FROM crawl_batch_items WHERE batch_id = ? GROUP BY status",
+                (batch_id,),
+            ).fetchall()
+        by_status = {item["status"]: int(item["count"]) for item in counts}
+        return CrawlBatch(
+            id=int(row["id"]), created_at=self._parse_datetime(row["created_at"]),
+            status=row["status"], crawl_mode=row["crawl_mode"], requested_limit=int(row["requested_limit"]),
+            candidate_count=int(row["candidate_count"]), selected_count=int(row["selected_count"]),
+            success_count=by_status.get("success", 0), failure_count=by_status.get("failed", 0),
+            pending_count=by_status.get("pending", 0) + by_status.get("running", 0),
+            filter_json=json.loads(row["filter_json"]), sort=row["sort"],
+            started_at=self._parse_datetime(row["started_at"]) if row["started_at"] else None,
+            finished_at=self._parse_datetime(row["finished_at"]) if row["finished_at"] else None,
+            last_error=row["last_error"],
+        )
+
+    def list_crawl_batches(self, limit: int = 50, offset: int = 0) -> list[CrawlBatch]:
+        with self._connect() as connection:
+            ids = [row["id"] for row in connection.execute("SELECT id FROM crawl_batches ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset)).fetchall()]
+        batches: list[CrawlBatch] = []
+        for batch_id in ids:
+            batch = self.get_crawl_batch(int(batch_id))
+            if batch is not None:
+                batches.append(batch)
+        return batches
+
+    def list_crawl_batch_items(self, batch_id: int) -> list[CrawlBatchItem]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM crawl_batch_items WHERE batch_id = ? ORDER BY position", (batch_id,)).fetchall()
+        return [CrawlBatchItem(int(row["id"]), int(row["batch_id"]), row["channel_id"], int(row["position"]), row["status"], self._parse_datetime(row["started_at"]) if row["started_at"] else None, self._parse_datetime(row["finished_at"]) if row["finished_at"] else None, row["error_message"]) for row in rows]
+
+    def claim_crawl_batch_items(self, batch_id: int, limit: int) -> list[CrawlBatchItem]:
+        now = self._timestamp(datetime.now(timezone.utc))
+        with self._connect() as connection:
+            connection.execute("UPDATE crawl_batches SET status = 'running', started_at = COALESCE(started_at, ?) WHERE id = ? AND status IN ('pending','running','completed_with_errors')", (now, batch_id))
+            rows = connection.execute("SELECT * FROM crawl_batch_items WHERE batch_id = ? AND status = 'pending' ORDER BY position LIMIT ?", (batch_id, limit)).fetchall()
+            for row in rows:
+                connection.execute("UPDATE crawl_batch_items SET status = 'running', started_at = ? WHERE id = ? AND status = 'pending'", (now, row["id"]))
+        return [CrawlBatchItem(int(row["id"]), int(row["batch_id"]), row["channel_id"], int(row["position"]), "running", self._parse_datetime(now), None, None) for row in rows]
+
+    def recover_running_crawl_batch_items(self, batch_id: int) -> None:
+        with self._connect() as connection:
+            connection.execute("UPDATE crawl_batch_items SET status = 'pending', started_at = NULL WHERE batch_id = ? AND status = 'running'", (batch_id,))
+            connection.execute("UPDATE crawl_batches SET status = 'pending' WHERE id = ? AND status = 'running'", (batch_id,))
+
+    def mark_crawl_batch_item(self, item_id: int, status: str, error_message: str | None = None) -> None:
+        if status not in {"success", "failed"}:
+            raise ValueError("invalid crawl batch item status")
+        now = self._timestamp(datetime.now(timezone.utc))
+        with self._connect() as connection:
+            row = connection.execute("SELECT batch_id FROM crawl_batch_items WHERE id = ?", (item_id,)).fetchone()
+            if row is None:
+                raise ValueError("crawl batch item not found")
+            connection.execute("UPDATE crawl_batch_items SET status = ?, finished_at = ?, error_message = ? WHERE id = ?", (status, now, error_message, item_id))
+        self.refresh_crawl_batch_status(int(row["batch_id"]))
+
+    def retry_failed_crawl_batch_items(self, batch_id: int) -> None:
+        with self._connect() as connection:
+            connection.execute("UPDATE crawl_batch_items SET status = 'pending', started_at = NULL, finished_at = NULL, error_message = NULL WHERE batch_id = ? AND status = 'failed'", (batch_id,))
+        self.refresh_crawl_batch_status(batch_id)
+
+    def refresh_crawl_batch_status(self, batch_id: int) -> str:
+        with self._connect() as connection:
+            counts = {row["status"]: int(row["count"]) for row in connection.execute("SELECT status, COUNT(*) AS count FROM crawl_batch_items WHERE batch_id = ? GROUP BY status", (batch_id,)).fetchall()}
+            pending = counts.get("pending", 0) + counts.get("running", 0)
+            if pending:
+                status = "running" if counts.get("running") else "pending"
+                finished = None
+            else:
+                status = "completed_with_errors" if counts.get("failed", 0) else "completed"
+                finished = self._timestamp(datetime.now(timezone.utc))
+            connection.execute("UPDATE crawl_batches SET status = ?, finished_at = ? WHERE id = ?", (status, finished, batch_id))
+        return status
+
     def list_discoveries_for_channel(
         self, channel_id: str
     ) -> list[ChannelDiscovery]:
@@ -739,6 +883,10 @@ class ChannelRepository:
     @staticmethod
     def _timestamp(value: datetime | None) -> str | None:
         return value.isoformat() if value else None
+
+    @staticmethod
+    def _parse_datetime(value: str) -> datetime:
+        return datetime.fromisoformat(value)
 
     @staticmethod
     def _channel(row: sqlite3.Row) -> Channel:
