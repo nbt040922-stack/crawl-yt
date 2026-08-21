@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 import json
+import re
+from io import BytesIO
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -27,6 +29,8 @@ from ..transcripts.provider import TranscriptService
 from ..transcripts.ytdlp_provider import YtDlpTranscriptProvider
 from ..scoring_lifecycle import ChannelScoringLifecycle
 from ..crawl_policy import CrawlPriorityPolicy
+from openpyxl import Workbook
+from openpyxl.styles import Font
 
 ROOT = Path(__file__).parent
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
@@ -46,6 +50,8 @@ def create_app(
 
     @app.exception_handler(Exception)
     async def friendly_error(request: Request, exc: Exception) -> HTMLResponse:
+        if isinstance(exc, HTTPException):
+            return HTMLResponse(str(exc.detail), status_code=exc.status_code)
         return templates.TemplateResponse(
             request=request,
             name="result.html",
@@ -111,16 +117,51 @@ def create_app(
         return render(request, "discovery_keyword.html", title=f"Discovery: {keyword}", keyword=keyword, rows=rows, page=page, per_page=per_page, total=total)
 
     @app.get("/channels", response_class=HTMLResponse)
-    def channels(request: Request, page: int = 1, per_page: int = 50, search: str | None = None, tier: str | None = None, keyword: str | None = None, min_videos_per_week: float | None = None, sort: str = "score", message: str | None = None) -> HTMLResponse:
-        per_page = min(max(per_page, 1), 100)
+    def channels(request: Request, page: int = 1, per_page: str = "50", search: str | None = None, tier: str | None = None, keyword: str | None = None, min_videos_per_week: float | None = None, min_score: float | None = None, sort: str = "score", message: str | None = None) -> HTMLResponse:
+        try:
+            requested_page_size = int(per_page)
+        except (TypeError, ValueError):
+            requested_page_size = 50
+        per_page = requested_page_size if requested_page_size in {25, 50, 100} else 50
         page = max(page, 1)
+        if min_videos_per_week is not None and min_videos_per_week < 0:
+            raise HTTPException(400, "minimum videos/week cannot be negative")
+        if min_score is not None and not 0 <= min_score <= 100:
+            raise HTTPException(400, "minimum score must be between 0 and 100")
+        if sort not in {"score", "cadence", "subscribers"}:
+            sort = "score"
+        total = database.count_channels_page(search, tier, keyword, min_videos_per_week, min_score)
+        page_count = max(1, (total + per_page - 1) // per_page)
+        page = min(page, page_count)
+        rows = database.list_channels_page(per_page, (page - 1) * per_page, search, tier, keyword, min_videos_per_week, sort, min_score)
+        query = {key: value for key, value in {"per_page": per_page, "search": search, "tier": tier, "keyword": keyword, "min_videos_per_week": min_videos_per_week, "min_score": min_score, "sort": sort}.items() if value not in (None, "")}
+        previous_url = "/channels?" + urlencode({**query, "page": page - 1}) if page > 1 else None
+        next_url = "/channels?" + urlencode({**query, "page": page + 1}) if page < page_count else None
+        return render(request, "list.html", title="Channels", page_kind="channels", rows=rows, page=page, page_count=page_count, per_page=per_page, total=total, search=search, tier=tier, keyword=keyword, keyword_options=database.list_discovery_keywords(), min_videos_per_week=min_videos_per_week, min_score=min_score, sort=sort, message=message, previous_url=previous_url, next_url=next_url, crawl_interval_labels={"high": "3 days", "medium": "7 days", "low": "14 days", "unscored": "1 day"})
+
+    @app.get("/channels/export.xlsx")
+    def export_channels(search: str | None = None, tier: str | None = None,
+                        keyword: str | None = None, min_videos_per_week: float | None = None,
+                        min_score: float = 60, sort: str = "score") -> StreamingResponse:
+        if min_score < 0 or min_score > 100:
+            raise HTTPException(400, "minimum score must be between 0 and 100")
         if min_videos_per_week is not None and min_videos_per_week < 0:
             raise HTTPException(400, "minimum videos/week cannot be negative")
         if sort not in {"score", "cadence", "subscribers"}:
             sort = "score"
-        total = database.count_channels_page(search, tier, keyword, min_videos_per_week)
-        rows = database.list_channels_page(per_page, (page - 1) * per_page, search, tier, keyword, min_videos_per_week, sort)
-        return render(request, "list.html", title="Channels", page_kind="channels", rows=rows, page=page, per_page=per_page, total=total, search=search, keyword=keyword, keyword_options=database.list_discovery_keywords(), min_videos_per_week=min_videos_per_week, sort=sort, message=message, crawl_interval_labels={"high": "3 days", "medium": "7 days", "low": "14 days", "unscored": "1 day"})
+        try:
+            rows = database.list_channels_for_export(search=search, tier=tier, keyword=keyword, min_videos_per_week=min_videos_per_week, min_score=min_score, sort=sort)
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
+        if not rows:
+            raise HTTPException(400, "No channels match the export filters.")
+        workbook = _channels_workbook(rows)
+        stream = BytesIO()
+        workbook.save(stream)
+        stream.seek(0)
+        slug = re.sub(r"[^a-z0-9]+", "-", (keyword or "channels").strip().lower()).strip("-") or "channels"
+        filename = f"crawl-yt-{slug}-score-{min_score:g}.xlsx"
+        return StreamingResponse(stream, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
     @app.get("/channels/{channel_id}", response_class=HTMLResponse)
     def channel_detail(request: Request, channel_id: str) -> HTMLResponse:
@@ -351,3 +392,30 @@ def _crawl_state_view(state: Any | None, score: Any | None = None) -> dict[str, 
 def _format_interval(value) -> str:
     days = value.days
     return f"{days} day" if days == 1 else f"{days} days"
+
+
+def _channels_workbook(rows: list[dict[str, object]]) -> Workbook:
+    headers = ["Channel", "Channel URL", "Channel ID", "Overall Score", "Tier", "Videos/Week 30d", "Videos/Week 90d", "Cadence Fit", "Subscribers", "Median Video Views", "Views / Subscribers", "Discovery Keywords", "Score Maturity", "Scoring Version", "Last Crawl", "Next Crawl"]
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Channels"
+    sheet.append(headers)
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+    for row in rows:
+        try:
+            reasons = json.loads(row.get("reason_json") or "{}")
+        except (TypeError, ValueError):
+            reasons = {}
+        url = row.get("channel_url") or f"https://www.youtube.com/channel/{row.get('channel_id')}"
+        values = [row.get("title"), url, row.get("channel_id"), row.get("score"), row.get("tier"), row.get("videos_per_week_30d"), row.get("videos_per_week_90d"), row.get("cadence_fit"), row.get("subscriber_count"), reasons.get("median_enriched_views"), reasons.get("view_subscriber_ratio"), row.get("discovery_keywords"), reasons.get("score_maturity"), row.get("scoring_version"), row.get("last_success_at"), row.get("next_crawl_at")]
+        sheet.append(values)
+        link = sheet.cell(sheet.max_row, 2)
+        link.hyperlink = str(url)
+        link.style = "Hyperlink"
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = f"A1:P{sheet.max_row}"
+    widths = [28, 48, 18, 15, 12, 17, 17, 16, 15, 20, 20, 28, 18, 18, 22, 22]
+    for index, width in enumerate(widths, 1):
+        sheet.column_dimensions[chr(64 + index)].width = width
+    return workbook

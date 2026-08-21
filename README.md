@@ -247,3 +247,4 @@ Discovery keywords được lưu theo dạng canonical: `Retirement`, ` retireme
 và `RETIREMENT` được coi là cùng một chủ đề. Chuỗi được trim, gộp whitespace,
 casefold theo Unicode và vẫn giữ nguyên dấu câu; lịch sử hiển thị khóa đã
 normalize để nhất quán.
+Trang Channels co nut Export Excel. Bang export tuan theo cac filter hien tai, khong bi gioi han boi pagination. Score mac dinh la 60.

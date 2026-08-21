@@ -27,6 +27,8 @@ from .models import (
 from ..discovery.normalization import normalize_discovery_keyword
 from ..crawl_policy import failure_retry_interval
 
+MAX_CHANNEL_EXPORT_ROWS = 50_000
+
 
 class ChannelRepository:
     def __init__(self, database_path: str | Path = "data/crawl_yt.db") -> None:
@@ -424,6 +426,7 @@ class ChannelRepository:
         self, limit: int, offset: int = 0, search: str | None = None,
         tier: str | None = None, keyword: str | None = None,
         min_videos_per_week: float | None = None, sort: str = "score",
+        min_score: float | None = None,
     ) -> list[dict[str, object]]:
         clauses = ["1=1"]
         parameters: list[object] = []
@@ -443,6 +446,9 @@ class ChannelRepository:
                 "AND cs.videos_per_week_30d >= ?"
             )
             parameters.append(min_videos_per_week)
+        if min_score is not None:
+            clauses.append("cs.score >= ?")
+            parameters.append(min_score)
         order_by = {
             "score": "cs.score IS NULL, cs.score DESC, c.channel_id",
             "cadence": "cs.videos_per_week_30d IS NULL, cs.videos_per_week_30d DESC, c.channel_id",
@@ -475,6 +481,7 @@ class ChannelRepository:
     def count_channels_page(
         self, search: str | None = None, tier: str | None = None, keyword: str | None = None,
         min_videos_per_week: float | None = None,
+        min_score: float | None = None,
     ) -> int:
         clauses = ["1=1"]
         parameters: list[object] = []
@@ -494,12 +501,71 @@ class ChannelRepository:
                 "AND cs.videos_per_week_30d >= ?"
             )
             parameters.append(min_videos_per_week)
+        if min_score is not None:
+            clauses.append("cs.score >= ?")
+            parameters.append(min_score)
         with self._connect() as connection:
             row = connection.execute(
                 f"SELECT COUNT(*) FROM channels c LEFT JOIN channel_scores cs ON cs.channel_id = c.channel_id WHERE {' AND '.join(clauses)}",
                 parameters,
             ).fetchone()
         return int(row[0])
+
+    def list_channels_for_export(
+        self, search: str | None = None, tier: str | None = None,
+        keyword: str | None = None, min_videos_per_week: float | None = None,
+        min_score: float | None = 60, sort: str = "score",
+        max_rows: int = MAX_CHANNEL_EXPORT_ROWS,
+    ) -> list[dict[str, object]]:
+        if min_score is not None and not 0 <= min_score <= 100:
+            raise ValueError("minimum score must be between 0 and 100")
+        if max_rows < 1:
+            raise ValueError("max_rows must be positive")
+        clauses = ["1=1"]
+        parameters: list[object] = []
+        if search:
+            clauses.append("(c.title LIKE ? OR c.channel_id LIKE ?)")
+            pattern = f"%{search}%"
+            parameters.extend((pattern, pattern))
+        if tier:
+            clauses.append("COALESCE(cs.tier, 'unscored') = ?")
+            parameters.append(tier)
+        if keyword:
+            clauses.append("EXISTS (SELECT 1 FROM channel_discoveries cd WHERE cd.channel_id = c.channel_id AND cd.normalized_keyword = ?)")
+            parameters.append(normalize_discovery_keyword(keyword))
+        if min_videos_per_week is not None:
+            clauses.append("json_extract(cs.reason_json, '$.observation_coverage_30d') = 1 AND cs.videos_per_week_30d >= ?")
+            parameters.append(min_videos_per_week)
+        if min_score is not None:
+            clauses.append("cs.score >= ?")
+            parameters.append(min_score)
+        order_by = {
+            "score": "cs.score DESC, c.channel_id",
+            "cadence": "cs.videos_per_week_30d DESC, c.channel_id",
+            "subscribers": "c.subscriber_count DESC, c.channel_id",
+        }.get(sort, "cs.score DESC, c.channel_id")
+        parameters.append(max_rows + 1)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT c.*, cs.score AS score, cs.tier AS tier,
+                       cs.videos_per_week_30d, cs.videos_per_week_90d,
+                       cs.reason_json, cs.scoring_version,
+                       s.last_success_at, s.next_crawl_at,
+                       json_extract(cs.reason_json, '$.cadence_fit') AS cadence_fit,
+                       (SELECT GROUP_CONCAT(DISTINCT cd.normalized_keyword)
+                        FROM channel_discoveries cd WHERE cd.channel_id = c.channel_id) AS discovery_keywords
+                FROM channels c
+                LEFT JOIN channel_scores cs ON cs.channel_id = c.channel_id
+                LEFT JOIN channel_crawl_state s ON s.channel_id = c.channel_id
+                WHERE {' AND '.join(clauses)}
+                ORDER BY {order_by}
+                LIMIT ?
+                """, parameters,
+            ).fetchall()
+        if len(rows) > max_rows:
+            raise ValueError("Export matches more than 50,000 channels. Narrow your filters.")
+        return [dict(row) for row in rows]
 
     def list_discoveries_for_channel(
         self, channel_id: str

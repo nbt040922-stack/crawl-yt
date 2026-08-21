@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from io import BytesIO
 from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
 
 from src.crawl_yt.collectors.video_metadata import VideoMetadata
 from src.crawl_yt.database.models import Channel, ChannelScore, Transcript, Video, VideoScore
@@ -90,6 +92,48 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.client.get("/videos?page=1&per_page=1").status_code, 200)
         self.assertIn("Video one", self.client.get("/videos").text)
         self.assertEqual(self.client.get("/work-plans").status_code, 200)
+
+    def test_channels_default_pagination_and_valid_page_sizes(self) -> None:
+        repo = TranscriptRepository(Path(self.temp.name) / "many.db")
+        for number in range(81):
+            channel_id = f"UC{number:03d}"
+            repo.upsert_channel(Channel(channel_id, f"Channel {number:03d}"))
+            repo.record_discovery(channel_id, "retirement", "seed")
+        client = TestClient(create_app(repository=repo))
+        first = client.get("/channels")
+        self.assertIn("Page 1 of 2", first.text)
+        self.assertEqual(first.text.count('href="/channels/UC'), 50)
+        second = client.get("/channels?page=2")
+        self.assertIn("Page 2 of 2", second.text)
+        self.assertEqual(second.text.count('href="/channels/UC'), 31)
+        self.assertNotIn(">Next<", second.text)
+        self.assertIn("Previous", second.text)
+        self.assertIn("Page 1 of 4", client.get("/channels?per_page=25").text)
+        self.assertIn("Page 1 of 1", client.get("/channels?per_page=100").text)
+        self.assertIn("Page 1 of 2", client.get("/channels?per_page=10").text)
+        self.assertIn("Page 1 of 2", client.get("/channels?per_page=abc").text)
+
+    def test_channels_pagination_preserves_filters_and_clamps_large_page(self) -> None:
+        repo = TranscriptRepository(Path(self.temp.name) / "filtered-many.db")
+        for number in range(81):
+            channel_id = f"UF{number:03d}"
+            repo.upsert_channel(Channel(channel_id, f"Filtered {number:03d}"))
+            repo.record_discovery(channel_id, "Retirement Planning", "seed")
+        client = TestClient(create_app(repository=repo))
+        response = client.get("/channels?per_page=25&keyword= RETIREMENT   PLANNING &sort=subscribers")
+        self.assertIn("Page 1 of 4", response.text)
+        self.assertIn("/channels?per_page=25&amp;keyword=+RETIREMENT+++PLANNING+&amp;sort=subscribers&amp;page=2", response.text)
+        clamped = client.get("/channels?page=999&per_page=25&keyword=retirement%20planning")
+        self.assertIn("Page 4 of 4", clamped.text)
+        self.assertNotIn(">Next<", clamped.text)
+
+    def test_keyword_filter_normalizes_variants_and_count_matches_rows(self) -> None:
+        for keyword in ("retirement", " RETIREMENT ", "retirement   "):
+            response = self.client.get(f"/channels?keyword={keyword}")
+            self.assertIn("One", response.text)
+            self.assertIn("Two", response.text)
+        self.assertEqual(self.repository.count_channels_page(keyword=" RETIREMENT "), 2)
+        self.assertEqual(len(self.repository.list_channels_page(50, keyword="RETIREMENT")), 2)
 
     def test_channels_page_exposes_bounded_score_unscored_action(self) -> None:
         response = self.client.get("/channels")
@@ -186,6 +230,7 @@ class WebTests(unittest.TestCase):
         self.assertIn("Existing", response.text)
         self.assertIn("Channels scored", response.text)
         self.assertIn("Scoring failures", response.text)
+        self.assertIn("/channels?keyword=retirement", response.text)
 
     def test_empty_discovery_result_is_friendly(self) -> None:
         response = TestClient(create_app(repository=self.repository, discovery_provider=EmptyDiscoveryFake())).post("/discovery", data={"keyword": "unknown", "limit": "20"})
@@ -304,6 +349,51 @@ class WebTests(unittest.TestCase):
         self.repository.upsert_channel_score(ChannelScore("UC1", 80, 80, 80, 80, 80, "high", {}, now, "v2"))
         self.assertIn("3 days", self.client.get("/channels").text)
         self.assertIn("1 day", self.client.get("/channels").text)
+
+    def test_channel_export_defaults_to_score_60_and_formats_workbook(self) -> None:
+        now = datetime.now(timezone.utc)
+        self.repository.upsert_channel(Channel("UC59", "Below", channel_url="https://example.com/below"))
+        self.repository.upsert_channel(Channel("UC60", "Included", channel_url="https://example.com/included"))
+        self.repository.upsert_channel(Channel("UC80", "High"))
+        self.repository.record_discovery("UC60", "retirement", "seed", now)
+        for channel_id, score in (("UC59", 59.9), ("UC60", 60), ("UC80", 80)):
+            self.repository.upsert_channel_score(ChannelScore(channel_id, score, 70, 80, 75, 60, "high", {"videos_per_week_30d": 5.5, "videos_per_week_90d": 4.2, "cadence_fit": "very good", "median_enriched_views": 40000, "view_subscriber_ratio": 0.8, "score_maturity": "mature"}, now, "v2", 85, 5.5, 4.2))
+        response = self.client.get("/channels/export.xlsx")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.assertIn("attachment; filename=\"crawl-yt-channels-score-60.xlsx\"", response.headers["content-disposition"])
+        workbook = load_workbook(BytesIO(response.content))
+        sheet = workbook["Channels"]
+        self.assertEqual([cell.value for cell in sheet[1]], ["Channel", "Channel URL", "Channel ID", "Overall Score", "Tier", "Videos/Week 30d", "Videos/Week 90d", "Cadence Fit", "Subscribers", "Median Video Views", "Views / Subscribers", "Discovery Keywords", "Score Maturity", "Scoring Version", "Last Crawl", "Next Crawl"])
+        self.assertEqual(sheet.freeze_panes, "A2")
+        self.assertIsNotNone(sheet.auto_filter.ref)
+        values = list(sheet.iter_rows(min_row=2, values_only=False))
+        names = [row[0].value for row in values]
+        self.assertEqual(names, ["High", "Included"])
+        self.assertEqual(values[1][1].value, "https://example.com/included")
+        self.assertEqual(values[1][1].hyperlink.target, "https://example.com/included")
+        self.assertEqual(values[1][11].value, "retirement")
+        self.assertEqual(values[0][11].value, None)
+
+    def test_channel_export_respects_filters_and_ignores_pagination(self) -> None:
+        now = datetime.now(timezone.utc)
+        repo = TranscriptRepository(Path(self.temp.name) / "export-many.db")
+        for number in range(81):
+            channel_id = f"EX{number:03d}"
+            repo.upsert_channel(Channel(channel_id, f"Export {number:03d}"))
+            repo.record_discovery(channel_id, "retirement", "seed", now)
+            repo.upsert_channel_score(ChannelScore(channel_id, 80, 70, 80, 75, 60, "high", {"observation_coverage_30d": True, "cadence_fit": "very good"}, now, "v2", 85, 5.5, 4.2))
+        client = TestClient(create_app(repository=repo))
+        response = client.get("/channels/export.xlsx?min_score=60&keyword=RETIREMENT&min_videos_per_week=3&tier=high&page=2&per_page=50")
+        workbook = load_workbook(BytesIO(response.content), read_only=True)
+        self.assertEqual(workbook["Channels"].max_row, 82)
+
+    def test_channel_export_empty_and_safety_limit_are_friendly(self) -> None:
+        self.assertEqual(self.client.get("/channels/export.xlsx?min_score=100").status_code, 400)
+        self.repository.list_channels_for_export = lambda **kwargs: (_ for _ in ()).throw(ValueError("Export matches more than 50,000 channels. Narrow your filters."))
+        response = self.client.get("/channels/export.xlsx")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("50,000", response.text)
 
     def test_channel_zero_subscribers_is_not_missing(self) -> None:
         self.repository.upsert_channel(Channel("UC0", "Zero", subscriber_count=0))

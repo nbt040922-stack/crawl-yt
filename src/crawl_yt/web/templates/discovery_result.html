@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Discovery result</h1>
-{% if dry_run %}<p class="notice">Dry run — nothing was written to the database.</p>{% endif %}
+{% if dry_run %}<p class="notice">Dry run {{ "—" }} nothing was written to the database.</p>{% endif %}
 <section class="summary-grid" aria-label="Discovery summary">
   <div class="summary-card"><span>Search results</span><strong>{{ report.search_results }}</strong></div>
   <div class="summary-card"><span>Unique channels</span><strong>{{ report.unique_channels_in_search }}</strong></div>
@@ -20,16 +20,9 @@
 <div class="table-wrap"><table>
   <thead><tr><th>Channel</th><th>Channel ID</th><th>Status</th><th>Subscribers</th><th>YouTube</th><th>Details</th></tr></thead>
   <tbody>{% for channel in channels %}
-    <tr>
-      <td>{{ channel.title }}</td>
-      <td><code>{{ channel.channel_id }}</code></td>
-      <td><span class="badge {{ 'badge-new' if not dry_run and channel.channel_id in new_channel_ids else 'badge-existing' }}">{{ 'Discovered' if dry_run else ('New' if channel.channel_id in new_channel_ids else 'Existing') }}</span></td>
-      <td>{{ channel.subscriber_count if channel.subscriber_count is not none else '—' }}</td>
-      <td><a href="{{ channel.channel_url or 'https://www.youtube.com/channel/' ~ channel.channel_id }}" target="_blank" rel="noopener noreferrer">Open</a></td>
-      <td><a href="/channels/{{ channel.channel_id }}">View details</a></td>
-    </tr>
+    <tr><td>{{ channel.title }}</td><td><code>{{ channel.channel_id }}</code></td><td><span class="badge {{ 'badge-new' if not dry_run and channel.channel_id in new_channel_ids else 'badge-existing' }}">{{ 'Discovered' if dry_run else ('New' if channel.channel_id in new_channel_ids else 'Existing') }}</span></td><td>{{ channel.subscriber_count if channel.subscriber_count is not none else '—' }}</td><td><a href="{{ channel.channel_url or 'https://www.youtube.com/channel/' ~ channel.channel_id }}" target="_blank" rel="noopener noreferrer">Open</a></td><td><a href="/channels/{{ channel.channel_id }}">View details</a></td></tr>
   {% endfor %}</tbody>
 </table></div>
 {% endif %}
-<p><a href="/discovery/keywords/{{ quote(keyword, safe='') }}">View channels for “{{ keyword }}”</a> · <a href="/channels">View all channels</a></p>
+<p><a href="/discovery/keywords/{{ quote(keyword, safe='') }}">View channels for &quot;{{ keyword }}&quot;</a> · <a href="/channels?keyword={{ quote(keyword, safe='') }}">View in Channels</a> · <a href="/channels">View all channels</a></p>
 {% endblock %}
