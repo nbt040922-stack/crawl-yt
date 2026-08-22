@@ -10,7 +10,7 @@ from src.crawl_yt.database.models import Channel
 from src.crawl_yt.database.repository import ChannelRepository, VideoRepository
 from src.crawl_yt.discovery.channel_discovery import ChannelVerification, DiscoveryBatch, DiscoveryService
 from src.crawl_yt.discovery.channel_scoring import ChannelScoringService
-from src.crawl_yt.discovery.ytdlp_provider import normalize_channel
+from src.crawl_yt.discovery.ytdlp_provider import channel_videos_url, normalize_channel
 
 
 class FakeProvider:
@@ -63,6 +63,12 @@ class DiscoveryTests(unittest.TestCase):
     def test_skips_ambiguous_uploader_handle(self) -> None:
         self.assertIsNone(
             normalize_channel({"uploader_id": "@example", "uploader": "Example"})
+        )
+
+    def test_verification_uses_videos_tab_not_channel_tabs(self) -> None:
+        self.assertEqual(
+            channel_videos_url(Channel("UC123", "Example", channel_url="https://www.youtube.com/channel/UC123")),
+            "https://www.youtube.com/channel/UC123/videos",
         )
 
     def test_existing_channel_with_new_keyword_adds_relationship(self) -> None:
@@ -170,6 +176,19 @@ class DiscoveryTests(unittest.TestCase):
             self.assertEqual(report.accepted_count, 1)
             self.assertIn("verification_failed", report.rejected_candidates[0].evidence.reason)
             self.assertIsNotNone(repository.get_channel("UC2"))
+
+    def test_rejection_summary_buckets_empty_and_coverage(self) -> None:
+        channels = [Channel(f"UC{i}", f"Candidate {i}") for i in range(1, 7)]
+        with tempfile.TemporaryDirectory() as directory:
+            repository = ChannelRepository(Path(directory) / "test.db")
+            provider = self._provider(channels, matches={"UC1": 0, "UC2": 1, "UC3": 4, "UC4": 6, "UC5": 8, "UC6": 11})
+            report = DiscoveryService(provider, repository).discover("retirement", 20, mode="strict")
+            summary = report.rejection_summary()
+            self.assertEqual(summary["coverage_0_15"], 2)
+            self.assertEqual(summary["coverage_15_25"], 1)
+            self.assertEqual(summary["coverage_25_40"], 1)
+            self.assertEqual(summary["coverage_40_60"], 2)
+            self.assertEqual(summary["no_usable_sample"], 0)
 
 
 if __name__ == "__main__":

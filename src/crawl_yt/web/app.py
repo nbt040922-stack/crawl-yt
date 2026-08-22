@@ -109,6 +109,15 @@ def create_app(
             raise HTTPException(400, "Keyword and limit 1-1000 are required")
         provider = discovery_provider or YtDlpDiscoveryProvider()
         report = DiscoveryService(provider, database).discover(keyword.strip(), limit, dry_run=dry_run, mode=mode, related_terms=related_terms)
+        rejection_summary = report.rejection_summary()
+        if report.accepted_count == 0:
+            unusable = rejection_summary["no_usable_sample"] + rejection_summary["verification_failed"]
+            if report.rejected_count and unusable * 2 >= report.rejected_count:
+                zero_message = "Channel topic verification could not obtain enough recent video titles."
+            else:
+                zero_message = "Candidates were mostly off-topic. Consider adding related terms or using Broad."
+        else:
+            zero_message = None
         return render(
             request,
             "discovery_result.html",
@@ -120,6 +129,8 @@ def create_app(
             keyword=keyword.strip(),
             channels_scored=report.channels_scored,
             scoring_failures=report.scoring_failures,
+            rejection_summary=rejection_summary,
+            zero_message=zero_message,
         )
 
     @app.get("/discovery/keywords/{keyword}", response_class=HTMLResponse)

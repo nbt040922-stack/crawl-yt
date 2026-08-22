@@ -11,6 +11,12 @@ from ..database.models import Channel
 from .channel_discovery import ChannelVerification, DiscoveryBatch
 
 
+def channel_videos_url(channel: Channel) -> str:
+    """Return the videos tab URL so yt-dlp yields video entries, not tab links."""
+    base = channel.channel_url or f"https://www.youtube.com/channel/{channel.channel_id}"
+    return base.rstrip("/") + "/videos"
+
+
 def normalize_channel(entry: dict[str, Any]) -> Channel | None:
     channel_id = entry.get("channel_id")
     if not channel_id:
@@ -61,7 +67,7 @@ class YtDlpDiscoveryProvider:
         )
 
     def verify(self, channel: Channel, sample_size: int = 20) -> ChannelVerification:
-        url = channel.channel_url or f"https://www.youtube.com/channel/{channel.channel_id}"
+        url = channel_videos_url(channel)
         options = {
             "extract_flat": True,
             "quiet": True,
@@ -76,7 +82,7 @@ class YtDlpDiscoveryProvider:
             channel_id=channel.channel_id,
             title=str((info or {}).get("title") or channel.title),
             description=(info or {}).get("description") or channel.description,
-            channel_url=channel.channel_url or url,
+            channel_url=channel.channel_url or f"https://www.youtube.com/channel/{channel.channel_id}",
             subscriber_count=channel.subscriber_count,
             video_count=channel.video_count,
             view_count=channel.view_count,

@@ -57,6 +57,37 @@ class DiscoveryReport:
     rejected_count: int = 0
     accepted_candidates: list[DiscoveryCandidate] = field(default_factory=list)
     rejected_candidates: list[DiscoveryCandidate] = field(default_factory=list)
+    target_accepted: int = 0
+    maximum_candidates: int = 0
+
+    def rejection_summary(self) -> dict[str, int]:
+        summary = {
+            "no_usable_sample": 0,
+            "coverage_0_15": 0,
+            "coverage_15_25": 0,
+            "coverage_25_40": 0,
+            "coverage_40_60": 0,
+            "coverage_60_plus": 0,
+            "verification_failed": 0,
+        }
+        for candidate in self.rejected_candidates:
+            evidence = candidate.evidence
+            if evidence.reason.startswith("verification_failed:"):
+                summary["verification_failed"] += 1
+                continue
+            if evidence.sample_size == 0:
+                summary["no_usable_sample"] += 1
+            elif evidence.topic_coverage <= 0.15:
+                summary["coverage_0_15"] += 1
+            elif evidence.topic_coverage <= 0.25:
+                summary["coverage_15_25"] += 1
+            elif evidence.topic_coverage < 0.40:
+                summary["coverage_25_40"] += 1
+            elif evidence.topic_coverage < 0.60:
+                summary["coverage_40_60"] += 1
+            else:
+                summary["coverage_60_plus"] += 1
+        return summary
 
 
 class DiscoveryService:
@@ -165,6 +196,8 @@ class DiscoveryService:
             rejected_count=len(rejected),
             accepted_candidates=accepted,
             rejected_candidates=rejected,
+            target_accepted=limit,
+            maximum_candidates=candidate_cap,
         )
         if not dry_run:
             scoring = self.scoring_lifecycle.score_channels(score_candidates)

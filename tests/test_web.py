@@ -48,6 +48,28 @@ class RelevanceDiscoveryFake:
         return ChannelVerification(channel, [f"{self.keyword} planning"] * count + ["Unrelated topic"] * (sample_size - count))
 
 
+class ModeDiscoveryFake:
+    def __init__(self, matches):
+        self.matches = matches
+        self.calls = []
+
+    def search(self, keyword, limit):
+        self.calls.append((keyword, limit))
+        self.keyword = keyword
+        return DiscoveryBatch(100, [Channel("UCMODE", "Mode Candidate")], "fake")
+
+    def verify(self, channel, sample_size=20):
+        return ChannelVerification(channel, [f"{self.keyword} planning"] * self.matches + ["Unrelated topic"] * (sample_size - self.matches))
+
+
+class EmptySampleDiscoveryFake:
+    def search(self, keyword, limit):
+        return DiscoveryBatch(1, [Channel("UCEMPTY", "Empty Sample")], "fake")
+
+    def verify(self, channel, sample_size=20):
+        return ChannelVerification(channel, [])
+
+
 class VideoFake:
     def __init__(self, video=None):
         self.calls = []
@@ -337,7 +359,39 @@ class WebTests(unittest.TestCase):
         self.assertIn("Related terms: planning", response.text)
         self.assertIn("Accepted", response.text)
         self.assertIn("1 / 20", response.text)
-        self.assertIn("Rejected</td>", response.text)
+        self.assertIn("Rejected<br>", response.text)
+
+    def test_discovery_form_explains_target_accepted_semantics(self) -> None:
+        response = self.client.get("/discovery")
+        self.assertIn("Target accepted channels", response.text)
+        self.assertIn("Discovery may inspect more candidates to find this many relevant channels.", response.text)
+
+    def test_discovery_mode_propagates_through_web_boundary(self) -> None:
+        for mode, matches, accepted in (("strict", 6, 0), ("balanced", 6, 0), ("broad", 6, 1), ("strict", 9, 0), ("balanced", 9, 1), ("broad", 9, 1), ("strict", 13, 1), ("balanced", 13, 1), ("broad", 13, 1)):
+            provider = ModeDiscoveryFake(matches)
+            response = TestClient(create_app(repository=self.repository, discovery_provider=provider)).post(
+                "/discovery", data={"keyword": "retirement", "limit": "1", "mode": mode}
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(f"<strong>{mode.title()}</strong>", response.text)
+            self.assertIn(f"<span>Accepted</span><strong>{accepted}</strong>", response.text)
+            self.assertEqual(provider.calls, [("retirement", 5)])
+
+    def test_discovery_result_shows_target_and_rejection_buckets(self) -> None:
+        provider = ModeDiscoveryFake(0)
+        response = TestClient(create_app(repository=self.repository, discovery_provider=provider)).post(
+            "/discovery", data={"keyword": "retirement", "limit": "20", "mode": "balanced"}
+        )
+        for label in ("Target accepted", "Maximum candidates", "Search results inspected", "Unique channels inspected", "No usable video sample", "0–15% coverage", "Verification failed"):
+            self.assertIn(label, response.text)
+        self.assertIn("Candidates were mostly off-topic. Consider adding related terms or using Broad.", response.text)
+
+    def test_discovery_empty_sample_diagnostic_message(self) -> None:
+        response = TestClient(create_app(repository=self.repository, discovery_provider=EmptySampleDiscoveryFake())).post(
+            "/discovery", data={"keyword": "retirement", "limit": "1", "mode": "balanced"}
+        )
+        self.assertIn("No usable video sample: 1", response.text)
+        self.assertIn("Channel topic verification could not obtain enough recent video titles.", response.text)
 
     def test_discovery_history_shows_keyword_counts_and_links(self) -> None:
         response = self.client.get("/discovery")
