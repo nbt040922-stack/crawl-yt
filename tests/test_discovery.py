@@ -8,7 +8,16 @@ from pathlib import Path
 
 from src.crawl_yt.database.models import Channel
 from src.crawl_yt.database.repository import ChannelRepository, VideoRepository
-from src.crawl_yt.discovery.channel_discovery import ChannelVerification, DiscoveryBatch, DiscoveryService
+from src.crawl_yt.discovery.channel_discovery import (
+    ChannelVerification,
+    DiscoveryBatch,
+    DiscoveryCandidate,
+    DiscoveryQueryMetric,
+    DiscoveryService,
+    build_discovery_query_plan,
+    unique_candidate_budget,
+)
+from src.crawl_yt.discovery.relevance import TopicEvidence
 from src.crawl_yt.discovery.channel_scoring import ChannelScoringService
 from src.crawl_yt.discovery.ytdlp_provider import channel_videos_url, normalize_channel
 
@@ -45,6 +54,302 @@ class DiscoveryTests(unittest.TestCase):
                 return ChannelVerification(channel, titles)
 
         return Provider()
+
+    def _multi_query_provider(self, batches, matches=20):
+        class Provider:
+            def __init__(self):
+                self.search_calls = []
+                self.verify_calls = []
+
+            def search(self, keyword, limit):
+                self.search_calls.append((keyword, limit))
+                channels = batches[keyword]
+                return DiscoveryBatch(len(channels), channels, "fake")
+
+            def verify(self, channel, sample_size=20):
+                self.verify_calls.append(channel.channel_id)
+                count = matches[channel.channel_id] if isinstance(matches, dict) else matches
+                titles = ["Retirement planning advice"] * count
+                titles += ["Unrelated gardening"] * (sample_size - count)
+                return ChannelVerification(channel, titles)
+
+        return Provider()
+
+    def _profile(self, repository, *search_concepts):
+        return repository.create_topic_profile(
+            "Retirement", "", ["retirement planning"], list(search_concepts),
+        )
+
+    def test_query_plan_keeps_primary_query_first(self) -> None:
+        plan = build_discovery_query_plan("  Retirement   Planning  ", ["solo retirement"])
+
+        self.assertEqual(plan, ["Retirement Planning", "solo retirement"])
+
+    def test_query_plan_removes_normalized_duplicates(self) -> None:
+        plan = build_discovery_query_plan(
+            "Retirement Planning",
+            [" retirement   planning ", "Social Security", "social   security"],
+        )
+
+        self.assertEqual(plan, ["Retirement Planning", "Social Security"])
+
+    def test_query_plan_caps_secondary_search_concepts_at_seven(self) -> None:
+        plan = build_discovery_query_plan("retirement", [f"concept {number}" for number in range(10)])
+
+        self.assertEqual(plan, ["retirement", *[f"concept {number}" for number in range(7)]])
+
+    def test_unique_candidate_budget_clamps_target_multiplier(self) -> None:
+        self.assertEqual(unique_candidate_budget(1), 100)
+        self.assertEqual(unique_candidate_budget(10), 250)
+        self.assertEqual(unique_candidate_budget(100), 500)
+
+    def test_query_metrics_and_candidate_provenance_are_typed(self) -> None:
+        metric = DiscoveryQueryMetric("retirement", raw_results=10, unique_candidates=8, duplicate_candidates=2)
+        candidate = DiscoveryCandidate(
+            Channel("UC1", "Candidate"),
+            TopicEvidence(0, 0, 0.0, "none", "legacy", True, "legacy discovery"),
+            discovered_by_queries=["retirement", "solo retirement"],
+        )
+
+        self.assertEqual(metric.duplicate_candidates, 2)
+        self.assertEqual(candidate.discovered_by_queries, ["retirement", "solo retirement"])
+
+    def test_multi_query_discovery_deduplicates_a_through_h_and_records_provenance(self) -> None:
+        channels = {letter: Channel(f"UC{letter}", f"Candidate {letter}") for letter in "ABCDEFGH"}
+        batches = {
+            "retirement": [channels[letter] for letter in "ABCD"],
+            "retirement income": [channels[letter] for letter in "CDEF"],
+            "social security": [channels[letter] for letter in "FGH"],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            repository = ChannelRepository(Path(directory) / "test.db")
+            profile = self._profile(repository, "retirement income", "social security")
+            provider = self._multi_query_provider(batches)
+
+            report = DiscoveryService(provider, repository).discover(
+                "retirement", 8, topic_profile_id=profile.id,
+            )
+
+            self.assertEqual(provider.search_calls, [
+                ("retirement", 100),
+                ("retirement income", 100),
+                ("social security", 100),
+            ])
+            self.assertEqual(provider.verify_calls, [f"UC{letter}" for letter in "ABCDEFGH"])
+            self.assertEqual(report.search_results, 11)
+            self.assertEqual(report.unique_channels_in_search, 8)
+            self.assertEqual(report.duplicate_results_in_search, 3)
+            self.assertEqual(report.cross_query_duplicates, 3)
+            self.assertEqual(report.planned_queries, list(batches))
+            self.assertEqual(report.executed_queries, list(batches))
+            self.assertEqual(
+                [
+                    (metric.raw_results, metric.unique_candidates, metric.new_candidates, metric.duplicate_candidates)
+                    for metric in report.query_metrics
+                ],
+                [(4, 4, 4, 0), (4, 4, 2, 2), (3, 3, 2, 1)],
+            )
+            candidates = {
+                candidate.channel.channel_id: candidate
+                for candidate in report.accepted_candidates + report.rejected_candidates
+            }
+            self.assertEqual(candidates["UCC"].discovered_by_queries, ["retirement", "retirement income"])
+            self.assertEqual(candidates["UCF"].discovered_by_queries, ["retirement income", "social security"])
+            self.assertEqual([channel.channel_id for channel in report.channels], [f"UC{letter}" for letter in "ABCDEFGH"])
+
+    def test_secondary_queries_contribute_candidates_and_primary_is_only_persisted_keyword(self) -> None:
+        channels = {letter: Channel(f"UC{letter}", f"Candidate {letter}") for letter in "ABCD"}
+        batches = {
+            "retirement": [channels["A"], channels["B"]],
+            "retirement income": [channels["C"], channels["D"]],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            repository = ChannelRepository(Path(directory) / "test.db")
+            profile = self._profile(repository, "retirement income")
+            provider = self._multi_query_provider(batches)
+
+            report = DiscoveryService(provider, repository).discover(
+                "retirement", 4, topic_profile_id=profile.id,
+            )
+
+            self.assertEqual([channel.channel_id for channel in report.channels], ["UCA", "UCB", "UCC", "UCD"])
+            self.assertEqual(repository.count_discovery_relationships(), 4)
+            for channel_id in ("UCA", "UCB", "UCC", "UCD"):
+                self.assertTrue(repository.discovery_exists(channel_id, "retirement", "fake"))
+                self.assertFalse(repository.discovery_exists(channel_id, "retirement income", "fake"))
+
+    def test_discovery_stops_before_secondary_query_when_primary_reaches_target(self) -> None:
+        channels = [Channel(f"UC{letter}", f"Candidate {letter}") for letter in "ABCD"]
+        batches = {
+            "retirement": channels,
+            "retirement income": [Channel("UCE", "Candidate E")],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            repository = ChannelRepository(Path(directory) / "test.db")
+            profile = self._profile(repository, "retirement income")
+            provider = self._multi_query_provider(batches)
+
+            report = DiscoveryService(provider, repository).discover(
+                "retirement", 2, topic_profile_id=profile.id,
+            )
+
+            self.assertEqual(provider.search_calls, [("retirement", 100)])
+            self.assertEqual(provider.verify_calls, ["UCA", "UCB"])
+            self.assertEqual(report.executed_queries, ["retirement"])
+            self.assertEqual(report.candidate_count, 2)
+
+    def test_unique_candidate_override_limits_requests_and_inspection(self) -> None:
+        channels = {letter: Channel(f"UC{letter}", f"Candidate {letter}") for letter in "ABCDEFG"}
+        batches = {
+            "retirement": [channels[letter] for letter in "ABC"],
+            "retirement income": [channels[letter] for letter in "DEFG"],
+            "social security": [Channel("UCH", "Candidate H")],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            repository = ChannelRepository(Path(directory) / "test.db")
+            profile = self._profile(repository, "retirement income", "social security")
+            provider = self._multi_query_provider(batches, matches=0)
+
+            report = DiscoveryService(provider, repository).discover(
+                "retirement", 10, topic_profile_id=profile.id, maximum_candidates=5,
+            )
+
+            self.assertEqual(provider.search_calls, [("retirement", 5), ("retirement income", 2)])
+            self.assertEqual(provider.verify_calls, ["UCA", "UCB", "UCC", "UCD", "UCE"])
+            self.assertEqual(report.maximum_candidates, 5)
+            self.assertEqual(report.candidate_count, 5)
+            self.assertEqual(report.executed_queries, ["retirement", "retirement income"])
+
+    def test_unique_candidate_override_must_be_positive(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = ChannelRepository(Path(directory) / "test.db")
+
+            with self.assertRaisesRegex(ValueError, "maximum candidates"):
+                DiscoveryService(FakeProvider(), repository).discover(
+                    "retirement", maximum_candidates=0,
+                )
+
+    def test_provider_results_past_per_query_batch_are_not_inspected(self) -> None:
+        primary = [Channel(f"UC{i:03}", f"Candidate {i}") for i in range(101)]
+        secondary = Channel("UC-secondary", "Secondary candidate")
+        batches = {
+            "retirement": primary,
+            "retirement income": [secondary],
+        }
+        matches = {channel.channel_id: 0 for channel in primary}
+        matches[secondary.channel_id] = 20
+        with tempfile.TemporaryDirectory() as directory:
+            repository = ChannelRepository(Path(directory) / "test.db")
+            profile = self._profile(repository, "retirement income")
+            provider = self._multi_query_provider(batches, matches)
+
+            report = DiscoveryService(provider, repository).discover(
+                "retirement", 1, topic_profile_id=profile.id, maximum_candidates=200,
+            )
+
+            self.assertEqual(provider.search_calls, [("retirement", 100), ("retirement income", 100)])
+            self.assertNotIn("UC100", provider.verify_calls)
+            self.assertEqual(provider.verify_calls[-1], "UC-secondary")
+            self.assertEqual(report.candidate_count, 101)
+
+    def test_secondary_search_failure_is_recorded_and_later_queries_continue(self) -> None:
+        class Provider:
+            def __init__(self):
+                self.search_calls = []
+
+            def search(self, keyword, limit):
+                self.search_calls.append(keyword)
+                if keyword == "broken query":
+                    raise RuntimeError("search unavailable")
+                channels = [Channel("UC-later", "Later candidate")] if keyword == "later query" else []
+                return DiscoveryBatch(len(channels), channels, "fake")
+
+            def verify(self, channel, sample_size=20):
+                return ChannelVerification(channel, ["Retirement planning advice"] * sample_size)
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = ChannelRepository(Path(directory) / "test.db")
+            profile = self._profile(repository, "broken query", "later query")
+            provider = Provider()
+
+            report = DiscoveryService(provider, repository).discover(
+                "retirement", 1, topic_profile_id=profile.id,
+            )
+
+            self.assertEqual(provider.search_calls, ["retirement", "broken query", "later query"])
+            self.assertEqual(report.executed_queries, ["retirement", "broken query", "later query"])
+            self.assertEqual(
+                [(metric.query, metric.raw_results, metric.failure) for metric in report.query_metrics],
+                [
+                    ("retirement", 0, None),
+                    ("broken query", 0, "search unavailable"),
+                    ("later query", 1, None),
+                ],
+            )
+            self.assertTrue(repository.discovery_exists("UC-later", "retirement", "fake"))
+            self.assertFalse(repository.discovery_exists("UC-later", "later query", "fake"))
+            snapshot = repository.get_discovery_relevance_run(report.audit_run_id)
+            self.assertEqual(snapshot["query_metrics"][1]["failure"], "search unavailable")
+
+    def test_primary_search_failure_still_aborts_discovery(self) -> None:
+        class Provider:
+            def __init__(self):
+                self.search_calls = []
+
+            def search(self, keyword, limit):
+                self.search_calls.append(keyword)
+                raise RuntimeError("primary unavailable")
+
+            def verify(self, channel, sample_size=20):
+                raise AssertionError("primary failure must not verify")
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = ChannelRepository(Path(directory) / "test.db")
+            profile = self._profile(repository, "later query")
+            provider = Provider()
+
+            with self.assertRaisesRegex(RuntimeError, "primary unavailable"):
+                DiscoveryService(provider, repository).discover(
+                    "retirement", 1, topic_profile_id=profile.id,
+                )
+
+            self.assertEqual(provider.search_calls, ["retirement"])
+
+    def test_audit_snapshots_profile_matching_and_query_plan(self) -> None:
+        class Provider:
+            def search(self, keyword, limit):
+                return DiscoveryBatch(1, [Channel("UC1", "Living Alone")], "fake")
+
+            def verify(self, channel, sample_size=20):
+                return ChannelVerification(channel, ["Why I enjoy living alone"] * sample_size)
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = ChannelRepository(Path(directory) / "test.db")
+            profile = repository.create_topic_profile(
+                "Solo Aging", "", ["living alone"], ["aging in place"],
+            )
+            report = DiscoveryService(Provider(), repository).discover(
+                "solo aging", 1, topic_profile_id=profile.id,
+            )
+
+            repository.update_topic_profile(
+                profile.id, "Changed Profile", "", ["independent retirement"], ["new search"],
+            )
+            snapshot = repository.get_discovery_relevance_run(report.audit_run_id)
+
+            self.assertEqual(snapshot["profile_name"], "Solo Aging")
+            self.assertIn("living alone", snapshot["effective_concepts"])
+            self.assertNotIn("independent retirement", snapshot["effective_concepts"])
+            self.assertEqual(snapshot["planned_queries"], ["solo aging", "aging in place"])
+            self.assertEqual(snapshot["executed_queries"], ["solo aging"])
+            self.assertEqual(snapshot["query_metrics"], [{
+                "query": "solo aging",
+                "raw_results": 1,
+                "unique_candidates": 1,
+                "new_candidates": 1,
+                "duplicate_candidates": 0,
+                "failure": None,
+            }])
 
     def test_normalizes_stable_channel_id(self) -> None:
         channel = normalize_channel(

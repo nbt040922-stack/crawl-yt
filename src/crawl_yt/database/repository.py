@@ -258,6 +258,9 @@ class ChannelRepository:
                     profile_id INTEGER,
                     profile_name TEXT,
                     effective_concepts_json TEXT NOT NULL,
+                    planned_queries_json TEXT NOT NULL DEFAULT '[]',
+                    executed_queries_json TEXT NOT NULL DEFAULT '[]',
+                    query_metrics_json TEXT NOT NULL DEFAULT '[]',
                     summary_json TEXT NOT NULL,
                     candidate_evidence_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -415,6 +418,20 @@ class ChannelRepository:
                     "ALTER TABLE topic_profiles "
                     "ADD COLUMN search_concepts_json TEXT NOT NULL DEFAULT '[]'"
                 )
+            audit_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(discovery_relevance_runs)"
+                ).fetchall()
+            }
+            for name in (
+                "planned_queries_json", "executed_queries_json", "query_metrics_json",
+            ):
+                if name not in audit_columns:
+                    connection.execute(
+                        f"ALTER TABLE discovery_relevance_runs "
+                        f"ADD COLUMN {name} TEXT NOT NULL DEFAULT '[]'"
+                    )
 
     def upsert_channel(self, channel: Channel) -> bool:
         """Upsert canonical metadata, returning True only for a new channel."""
@@ -562,20 +579,27 @@ class ChannelRepository:
         maximum_candidates: int, profile_id: int | None,
         profile_name: str | None, effective_concepts: list[str],
         summary: dict[str, object], candidate_evidence: list[dict[str, object]],
+        planned_queries: list[str] | None = None,
+        executed_queries: list[str] | None = None,
+        query_metrics: list[dict[str, object]] | None = None,
     ) -> int:
         with self._connect() as connection:
             cursor = connection.execute(
                 """INSERT INTO discovery_relevance_runs
                    (keyword, mode, target_accepted, maximum_candidates,
                     profile_id, profile_name, effective_concepts_json,
+                    planned_queries_json, executed_queries_json, query_metrics_json,
                     summary_json, candidate_evidence_json, created_at)
                    VALUES (?, ?, ?, ?,
                            (SELECT id FROM topic_profiles WHERE id = ?),
-                           ?, ?, ?, ?, ?)""",
+                           ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     normalize_discovery_keyword(keyword), mode, target_accepted,
                     maximum_candidates, profile_id, profile_name,
                     json.dumps(effective_concepts, ensure_ascii=False),
+                    json.dumps(planned_queries or [], ensure_ascii=False),
+                    json.dumps(executed_queries or [], ensure_ascii=False),
+                    json.dumps(query_metrics or [], ensure_ascii=False),
                     json.dumps(summary, ensure_ascii=False),
                     json.dumps(candidate_evidence, ensure_ascii=False),
                     self._timestamp(datetime.now(timezone.utc)),
@@ -599,6 +623,9 @@ class ChannelRepository:
             "profile_id": row["profile_id"],
             "profile_name": row["profile_name"],
             "effective_concepts": list(json.loads(row["effective_concepts_json"])),
+            "planned_queries": list(json.loads(row["planned_queries_json"] or "[]")),
+            "executed_queries": list(json.loads(row["executed_queries_json"] or "[]")),
+            "query_metrics": list(json.loads(row["query_metrics_json"] or "[]")),
             "summary": dict(json.loads(row["summary_json"])),
             "candidate_evidence": list(json.loads(row["candidate_evidence_json"])),
             "created_at": datetime.fromisoformat(row["created_at"]),

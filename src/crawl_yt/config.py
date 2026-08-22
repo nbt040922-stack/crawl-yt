@@ -6,6 +6,12 @@ import os
 from dataclasses import dataclass
 
 
+DISCOVERY_MAX_QUERIES = 8
+DISCOVERY_PER_QUERY_BATCH_SIZE = 100
+DISCOVERY_MIN_UNIQUE_CANDIDATES = 100
+DISCOVERY_MAX_UNIQUE_CANDIDATES = 500
+
+
 @dataclass(frozen=True, slots=True)
 class Config:
     youtube_api_key: str | None

@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Iterable, Protocol
 
+from ..config import (
+    DISCOVERY_MAX_QUERIES,
+    DISCOVERY_MAX_UNIQUE_CANDIDATES,
+    DISCOVERY_MIN_UNIQUE_CANDIDATES,
+    DISCOVERY_PER_QUERY_BATCH_SIZE,
+)
 from ..database.models import Channel
 from ..database.repository import ChannelRepository
 from ..scoring_lifecycle import ChannelScoringLifecycle
@@ -17,6 +23,32 @@ from .relevance import (
     get_topic_policy,
     normalize_topic_terms,
 )
+
+
+def build_discovery_query_plan(primary_query: str, search_concepts: Iterable[str]) -> list[str]:
+    """Return normalized, case-insensitively unique queries with the primary first."""
+    primary = " ".join(primary_query.split())
+    if not primary:
+        return []
+    queries = [primary]
+    seen = {normalize_discovery_keyword(primary)}
+    for concept in search_concepts:
+        query = " ".join(str(concept).split())
+        normalized = normalize_discovery_keyword(query)
+        if normalized and normalized not in seen:
+            queries.append(query)
+            seen.add(normalized)
+        if len(queries) >= DISCOVERY_MAX_QUERIES:
+            break
+    return queries
+
+
+def unique_candidate_budget(target_accepted: int) -> int:
+    """Scale the unique-candidate ceiling while keeping discovery bounded."""
+    return min(
+        DISCOVERY_MAX_UNIQUE_CANDIDATES,
+        max(DISCOVERY_MIN_UNIQUE_CANDIDATES, target_accepted * 25),
+    )
 
 
 @dataclass(slots=True)
@@ -39,9 +71,20 @@ class ChannelDiscoveryProvider(Protocol):
 
 
 @dataclass(slots=True)
+class DiscoveryQueryMetric:
+    query: str
+    raw_results: int = 0
+    unique_candidates: int = 0
+    new_candidates: int = 0
+    duplicate_candidates: int = 0
+    failure: str | None = None
+
+
+@dataclass(slots=True)
 class DiscoveryCandidate:
     channel: Channel
     evidence: TopicEvidence
+    discovered_by_queries: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -73,6 +116,10 @@ class DiscoveryReport:
     topic_profile_name: str | None = None
     effective_concepts: list[str] = field(default_factory=list)
     audit_run_id: int | None = None
+    planned_queries: list[str] = field(default_factory=list)
+    executed_queries: list[str] = field(default_factory=list)
+    query_metrics: list[DiscoveryQueryMetric] = field(default_factory=list)
+    cross_query_duplicates: int = 0
 
     def rejection_summary(self) -> dict[str, int]:
         summary = {
@@ -125,6 +172,7 @@ class DiscoveryService:
         related_terms: Iterable[str] | str | None = None,
         topic_profile_id: int | None = None,
         extra_concepts: Iterable[str] | str | None = None,
+        maximum_candidates: int | None = None,
     ) -> DiscoveryReport:
         search_query = " ".join(keyword.split())
         provenance_keyword = normalize_discovery_keyword(search_query)
@@ -144,10 +192,16 @@ class DiscoveryService:
             profile.concept_phrases if profile else (),
             normalized_related,
         )
-        # Search beyond the requested accepted count, but keep the provider bounded.
-        candidate_cap = min(1000, max(limit, limit * 5))
-        batch = self.provider.search(search_query, candidate_cap)
-        unique = {channel.channel_id: channel for channel in batch.channels}
+        if maximum_candidates is not None and maximum_candidates < 1:
+            raise ValueError("maximum candidates must be positive")
+        candidate_cap = (
+            unique_candidate_budget(limit)
+            if maximum_candidates is None
+            else min(maximum_candidates, DISCOVERY_MAX_UNIQUE_CANDIDATES)
+        )
+        planned_queries = build_discovery_query_plan(
+            search_query, profile.search_concepts if profile else (),
+        )
         new_channels = existing_channels = 0
         new_channel_ids: list[str] = []
         new_relationships = existing_relationships = 0
@@ -156,58 +210,99 @@ class DiscoveryService:
         processed_channels: list[Channel] = []
         score_candidates: set[str] = set()
         inspected = 0
+        unique: dict[str, Channel] = {}
+        candidates_by_id: dict[str, DiscoveryCandidate] = {}
+        executed_queries: list[str] = []
+        query_metrics: list[DiscoveryQueryMetric] = []
+        search_results = duplicate_results = cross_query_duplicates = 0
 
-        for channel in unique.values():
-            if inspected >= candidate_cap or len(accepted) >= limit:
+        for query_index, query in enumerate(planned_queries):
+            if len(accepted) >= limit or inspected >= candidate_cap:
                 break
-            inspected += 1
-            if not self.enforce_topic_gate:
-                verified_channel = channel
-                evidence = TopicEvidence(0, 0, 0.0, "none", "legacy", True, "legacy discovery")
-            else:
-                try:
-                    verification = self.provider.verify(channel, DISCOVERY_TOPIC_SAMPLE_SIZE)
-                    verified_channel = verification.channel
-                    evidence = evaluate_channel_topic(
-                        verified_channel, search_query, effective_concepts,
-                        verification.recent_video_titles, policy.mode,
-                    )
-                except Exception as error:
-                    evidence = TopicEvidence(0, 0, 0.0, "none", "none", False, f"verification_failed: {error}")
+            request_limit = min(DISCOVERY_PER_QUERY_BATCH_SIZE, candidate_cap - inspected)
+            executed_queries.append(query)
+            try:
+                batch = self.provider.search(query, request_limit)
+            except Exception as error:
+                if query_index == 0:
+                    raise
+                query_metrics.append(DiscoveryQueryMetric(
+                    query, failure=str(error) or type(error).__name__,
+                ))
+                continue
+            metric = DiscoveryQueryMetric(query, raw_results=batch.search_results)
+            search_results += batch.search_results
+            query_channel_ids: set[str] = set()
+
+            for channel in batch.channels[:request_limit]:
+                if len(accepted) >= limit or inspected >= candidate_cap:
+                    break
+                channel_id = channel.channel_id
+                if channel_id in query_channel_ids:
+                    metric.duplicate_candidates += 1
+                    duplicate_results += 1
+                    continue
+                query_channel_ids.add(channel_id)
+                metric.unique_candidates += 1
+                if channel_id in unique:
+                    metric.duplicate_candidates += 1
+                    duplicate_results += 1
+                    cross_query_duplicates += 1
+                    candidates_by_id[channel_id].discovered_by_queries.append(query)
+                    continue
+
+                unique[channel_id] = channel
+                metric.new_candidates += 1
+                inspected += 1
+                if not self.enforce_topic_gate:
                     verified_channel = channel
-            candidate = DiscoveryCandidate(verified_channel, evidence)
-            if not evidence.accepted:
-                rejected.append(candidate)
-                continue
-            accepted.append(candidate)
-            known = self.repository.get_channel(verified_channel.channel_id) is not None
-            if max_new_channels is not None and not known and new_channels >= max_new_channels:
-                continue
-            if dry_run:
-                is_new_channel = not known
-                is_new_relationship = not self.repository.discovery_exists(
-                    verified_channel.channel_id, provenance_keyword, batch.source
-                )
-            else:
-                is_new_channel = self.repository.upsert_channel(verified_channel)
-                is_new_relationship = self.repository.record_discovery(
-                    verified_channel.channel_id, provenance_keyword, batch.source
-                )
-            processed_channels.append(verified_channel)
-            score_repository = getattr(self.scoring_lifecycle, "repository", self.repository)
-            current_score = score_repository.get_channel_score(verified_channel.channel_id) if hasattr(score_repository, "get_channel_score") else None
-            if not dry_run and (is_new_channel or current_score is None or is_new_relationship):
-                score_candidates.add(verified_channel.channel_id)
-            new_channels += is_new_channel
-            new_channel_ids.extend([verified_channel.channel_id] if is_new_channel else [])
-            existing_channels += not is_new_channel
-            new_relationships += is_new_relationship
-            existing_relationships += not is_new_relationship
+                    evidence = TopicEvidence(0, 0, 0.0, "none", "legacy", True, "legacy discovery")
+                else:
+                    try:
+                        verification = self.provider.verify(channel, DISCOVERY_TOPIC_SAMPLE_SIZE)
+                        verified_channel = verification.channel
+                        evidence = evaluate_channel_topic(
+                            verified_channel, search_query, effective_concepts,
+                            verification.recent_video_titles, policy.mode,
+                        )
+                    except Exception as error:
+                        evidence = TopicEvidence(0, 0, 0.0, "none", "none", False, f"verification_failed: {error}")
+                        verified_channel = channel
+                candidate = DiscoveryCandidate(verified_channel, evidence, [query])
+                candidates_by_id[channel_id] = candidate
+                if not evidence.accepted:
+                    rejected.append(candidate)
+                    continue
+                accepted.append(candidate)
+                known = self.repository.get_channel(verified_channel.channel_id) is not None
+                if max_new_channels is not None and not known and new_channels >= max_new_channels:
+                    continue
+                if dry_run:
+                    is_new_channel = not known
+                    is_new_relationship = not self.repository.discovery_exists(
+                        verified_channel.channel_id, provenance_keyword, batch.source
+                    )
+                else:
+                    is_new_channel = self.repository.upsert_channel(verified_channel)
+                    is_new_relationship = self.repository.record_discovery(
+                        verified_channel.channel_id, provenance_keyword, batch.source
+                    )
+                processed_channels.append(verified_channel)
+                score_repository = getattr(self.scoring_lifecycle, "repository", self.repository)
+                current_score = score_repository.get_channel_score(verified_channel.channel_id) if hasattr(score_repository, "get_channel_score") else None
+                if not dry_run and (is_new_channel or current_score is None or is_new_relationship):
+                    score_candidates.add(verified_channel.channel_id)
+                new_channels += is_new_channel
+                new_channel_ids.extend([verified_channel.channel_id] if is_new_channel else [])
+                existing_channels += not is_new_channel
+                new_relationships += is_new_relationship
+                existing_relationships += not is_new_relationship
+            query_metrics.append(metric)
 
         report = DiscoveryReport(
-            search_results=batch.search_results,
+            search_results=search_results,
             unique_channels_in_search=len(unique),
-            duplicate_results_in_search=len(batch.channels) - len(unique),
+            duplicate_results_in_search=duplicate_results,
             new_channels=new_channels,
             existing_channels=existing_channels,
             new_discovery_relationships=new_relationships,
@@ -229,6 +324,10 @@ class DiscoveryService:
             topic_profile_id=profile.id if profile else None,
             topic_profile_name=profile.name if profile else None,
             effective_concepts=effective_concepts,
+            planned_queries=planned_queries,
+            executed_queries=executed_queries,
+            query_metrics=query_metrics,
+            cross_query_duplicates=cross_query_duplicates,
         )
         if not dry_run:
             scoring = self.scoring_lifecycle.score_channels(score_candidates)
@@ -243,6 +342,9 @@ class DiscoveryService:
                 profile_id=report.topic_profile_id,
                 profile_name=report.topic_profile_name,
                 effective_concepts=report.effective_concepts,
+                planned_queries=report.planned_queries,
+                executed_queries=report.executed_queries,
+                query_metrics=[asdict(metric) for metric in report.query_metrics],
                 summary={
                     "search_results": report.search_results,
                     "unique_channels": report.unique_channels_in_search,

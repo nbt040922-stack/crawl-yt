@@ -86,6 +86,32 @@ class ProfileDiscoveryFake:
         return ChannelVerification(channel, titles)
 
 
+class MultiQueryDiscoveryFake:
+    def search(self, keyword, limit):
+        if keyword == "broken query":
+            raise RuntimeError("search unavailable")
+        channels = {
+            "retirement": [
+                Channel("UC-MATCH", "Matched channel"),
+                Channel("UC-REJECT", "Rejected channel"),
+            ],
+            "retirement income": [
+                Channel("UC-MATCH", "Matched channel"),
+                Channel("UC-SECOND", "Second matched channel"),
+            ],
+        }
+        batch = channels[keyword][:limit]
+        return DiscoveryBatch(len(batch), batch, "fake")
+
+    def verify(self, channel, sample_size=20):
+        titles = (
+            ["Unrelated topic"] * sample_size
+            if channel.channel_id == "UC-REJECT"
+            else ["Retirement planning advice"] * sample_size
+        )
+        return ChannelVerification(channel, titles)
+
+
 class VideoFake:
     def __init__(self, video=None):
         self.calls = []
@@ -334,7 +360,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(app_client.get("/discovery").status_code, 200)
         self.assertEqual(provider.calls, [])
         self.assertEqual(app_client.post("/discovery", data={"keyword": "retirement", "limit": "1", "related_terms": "planning"}).status_code, 200)
-        self.assertEqual(provider.calls, [("retirement", 5)])
+        self.assertEqual(provider.calls, [("retirement", 100)])
 
     def test_discovery_result_is_structured_and_labels_statuses(self) -> None:
         provider = DiscoveryFake()
@@ -352,6 +378,41 @@ class WebTests(unittest.TestCase):
         self.assertIn("Channels scored", response.text)
         self.assertIn("Scoring failures", response.text)
         self.assertIn("/channels?keyword=retirement", response.text)
+
+    def test_discovery_result_renders_query_metrics_and_candidate_provenance(self) -> None:
+        profile = self.repository.create_topic_profile(
+            "Retirement", "", ["retirement planning"], ["retirement income", "broken query"],
+        )
+        response = TestClient(create_app(
+            repository=self.repository, discovery_provider=MultiQueryDiscoveryFake(),
+        )).post(
+            "/discovery",
+            data={"keyword": "retirement", "limit": "5", "topic_profile_id": str(profile.id)},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        for label in (
+            "Planned queries", "Executed queries", "Raw results", "Unique candidates",
+            "Cross-query duplicates", "Query breakdown", "Found by",
+        ):
+            self.assertIn(label, response.text)
+        for metric in (
+            '<span>Planned queries</span><strong>3</strong>',
+            '<span>Executed queries</span><strong>3</strong>',
+            '<span>Raw results</span><strong>4</strong>',
+            '<span>Unique candidates</span><strong>3</strong>',
+            '<span>Cross-query duplicates</span><strong>1</strong>',
+            '<span>Accepted</span><strong>2</strong>',
+            '<span>Rejected</span><strong>1</strong>',
+        ):
+            self.assertIn(metric, response.text)
+        self.assertIn("retirement income", response.text)
+        self.assertIn("<td>2</td><td>2</td><td>1</td><td>1</td>", response.text)
+        self.assertIn("search unavailable", response.text)
+        self.assertIn("retirement; retirement income", response.text)
+        self.assertIn("<td>retirement</td><td>Coverage below Balanced minimum.</td>", response.text)
+        self.assertNotIn("DiscoveryReport(", response.text)
+        self.assertNotIn("DiscoveryQueryMetric(", response.text)
 
     def test_empty_discovery_result_is_friendly(self) -> None:
         response = TestClient(create_app(repository=self.repository, discovery_provider=EmptyDiscoveryFake())).post("/discovery", data={"keyword": "unknown", "limit": "20"})
@@ -396,14 +457,14 @@ class WebTests(unittest.TestCase):
             self.assertIn(f"<span>Minimum coverage</span><strong>{minimum}%</strong>", response.text)
             self.assertIn("<span>Minimum distinct concepts</span><strong>2</strong>", response.text)
             self.assertIn(f"<span>Strong identity floor</span><strong>{identity_floor}%</strong>", response.text)
-            self.assertEqual(provider.calls, [("retirement", 5)])
+            self.assertEqual(provider.calls, [("retirement", 100)])
 
     def test_discovery_result_shows_target_and_rejection_buckets(self) -> None:
         provider = ModeDiscoveryFake(0)
         response = TestClient(create_app(repository=self.repository, discovery_provider=provider)).post(
             "/discovery", data={"keyword": "retirement", "limit": "20", "mode": "balanced"}
         )
-        for label in ("Target accepted", "Maximum candidates", "Search results inspected", "Unique channels inspected", "No usable video sample", "0–15% coverage", "Verification failed"):
+        for label in ("Target accepted", "Maximum candidates", "Raw results", "Unique candidates", "No usable video sample", "0–15% coverage", "Verification failed"):
             self.assertIn(label, response.text)
         self.assertIn("Candidates were mostly off-topic. Consider adding extra concepts or using Broad.", response.text)
 
@@ -417,7 +478,12 @@ class WebTests(unittest.TestCase):
     def test_topic_profile_crud_ui_and_discovery_selector(self) -> None:
         created = self.client.post(
             "/topic-profiles",
-            data={"name": "Solo Aging", "description": "Independent later life", "concept_phrases": "Living Alone\nliving   alone\nSenior Life"},
+            data={
+                "name": "Solo Aging",
+                "description": "Independent later life",
+                "concept_phrases": "Living Alone\nliving   alone\nSenior Life",
+                "search_concepts": "solo retirement\naging independently",
+            },
             follow_redirects=False,
         )
         self.assertEqual(created.status_code, 303)
@@ -426,6 +492,10 @@ class WebTests(unittest.TestCase):
         self.assertIn("Solo Aging", detail.text)
         self.assertIn("living alone", detail.text)
         self.assertIn("senior life", detail.text)
+        self.assertIn("Verification terms", detail.text)
+        self.assertIn("Candidate-finding terms", detail.text)
+        self.assertIn("solo retirement", detail.text)
+        self.assertIn("aging independently", detail.text)
         self.assertIn("Solo Aging", self.client.get("/topic-profiles").text)
         discovery = self.client.get("/discovery")
         self.assertIn("Topic profile", discovery.text)
@@ -435,14 +505,53 @@ class WebTests(unittest.TestCase):
         profile_id = int(detail_url.rsplit("/", 1)[-1])
         updated = self.client.post(
             f"/topic-profiles/{profile_id}",
-            data={"name": "Solo Aging Updated", "description": "", "concept_phrases": "independent aging"},
+            data={
+                "name": "Solo Aging Updated",
+                "description": "",
+                "concept_phrases": "independent aging",
+                "search_concepts": "later life planning",
+            },
             follow_redirects=False,
         )
         self.assertEqual(updated.status_code, 303)
-        self.assertIn("Solo Aging Updated", self.client.get(detail_url).text)
+        updated_detail = self.client.get(detail_url).text
+        self.assertIn("Solo Aging Updated", updated_detail)
+        self.assertIn("independent aging", updated_detail)
+        self.assertIn("later life planning", updated_detail)
         deleted = self.client.post(f"/topic-profiles/{profile_id}/delete", follow_redirects=False)
         self.assertEqual(deleted.status_code, 303)
         self.assertNotIn("Solo Aging Updated", self.client.get("/topic-profiles").text)
+
+    def test_legacy_topic_profile_renders_without_candidate_finding_terms(self) -> None:
+        profile = self.repository.create_topic_profile("Legacy", "", ["living alone"])
+
+        detail = self.client.get(f"/topic-profiles/{profile.id}")
+        edit = self.client.get(f"/topic-profiles/{profile.id}/edit")
+        listing = self.client.get("/topic-profiles")
+
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn("Verification terms", detail.text)
+        self.assertIn("living alone", detail.text)
+        self.assertIn("No candidate-finding terms.", detail.text)
+        self.assertIn('name="search_concepts"', edit.text)
+        self.assertIn("Candidate-finding terms", edit.text)
+        self.assertIn("Candidate-finding terms", listing.text)
+
+    def test_legacy_profile_update_preserves_omitted_candidate_finding_terms(self) -> None:
+        profile = self.repository.create_topic_profile(
+            "Solo Aging", "", ["living alone"], ["solo retirement"],
+        )
+
+        updated = self.client.post(
+            f"/topic-profiles/{profile.id}",
+            data={"name": "Solo Aging", "description": "", "concept_phrases": "aging alone"},
+            follow_redirects=False,
+        )
+
+        self.assertEqual(updated.status_code, 303)
+        detail = self.client.get(f"/topic-profiles/{profile.id}").text
+        self.assertIn("aging alone", detail)
+        self.assertIn("solo retirement", detail)
 
     def test_discovery_profile_renders_snapshot_top_concepts_and_title_evidence(self) -> None:
         profile = self.repository.create_topic_profile("Solo Aging", "", ["living alone", "senior life"])
@@ -460,7 +569,7 @@ class WebTests(unittest.TestCase):
         self.assertIn("Why I enjoy living alone after 65", response.text)
         self.assertIn("matched: living alone", response.text)
         self.assertIn("Kitchen tools", response.text)
-        self.assertEqual(provider.search_calls, [("solo aging", 5)])
+        self.assertEqual(provider.search_calls, [("solo aging", 100)])
         self.assertEqual(provider.verify_calls, [("UCPROFILE", 20)])
 
     def test_discovery_history_shows_keyword_counts_and_links(self) -> None:

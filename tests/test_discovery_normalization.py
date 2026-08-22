@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -81,6 +82,58 @@ class DiscoveryNormalizationTests(unittest.TestCase):
             )
             self.assertEqual(provider.query, "Retirement Planning")
             self.assertEqual(repository.list_discovery_keyword_summaries()[0]["keyword"], "retirement planning")
+
+    def test_legacy_audit_rows_receive_safe_query_snapshot_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "legacy.sqlite"
+            connection = sqlite3.connect(database_path)
+            try:
+                connection.execute(
+                    """CREATE TABLE discovery_relevance_runs (
+                       id INTEGER PRIMARY KEY AUTOINCREMENT,
+                       keyword TEXT NOT NULL,
+                       mode TEXT NOT NULL,
+                       target_accepted INTEGER NOT NULL,
+                       maximum_candidates INTEGER NOT NULL,
+                       profile_id INTEGER,
+                       profile_name TEXT,
+                       effective_concepts_json TEXT NOT NULL,
+                       summary_json TEXT NOT NULL,
+                       candidate_evidence_json TEXT NOT NULL,
+                       created_at TEXT NOT NULL
+                       )"""
+                )
+                connection.execute(
+                    """INSERT INTO discovery_relevance_runs
+                       (keyword, mode, target_accepted, maximum_candidates,
+                        profile_id, profile_name, effective_concepts_json,
+                        summary_json, candidate_evidence_json, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        "retirement", "balanced", 1, 100, None, None,
+                        '["retirement"]', '{}', '[]',
+                        datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat(),
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            repository = ChannelRepository(database_path)
+            ChannelRepository(database_path)
+            snapshot = repository.get_discovery_relevance_run(1)
+
+            self.assertEqual(snapshot["planned_queries"], [])
+            self.assertEqual(snapshot["executed_queries"], [])
+            self.assertEqual(snapshot["query_metrics"], [])
+            with repository._connect() as connection:
+                columns = {
+                    row["name"]
+                    for row in connection.execute("PRAGMA table_info(discovery_relevance_runs)")
+                }
+            self.assertTrue({
+                "planned_queries_json", "executed_queries_json", "query_metrics_json",
+            }.issubset(columns))
 
 
 if __name__ == "__main__":

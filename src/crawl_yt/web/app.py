@@ -159,9 +159,12 @@ def create_app(
     def topic_profile_create(
         name: str = Form(...), description: str = Form(""),
         concept_phrases: str = Form(...),
+        search_concepts: str = Form(""),
     ) -> RedirectResponse:
         try:
-            profile = database.create_topic_profile(name, description, concept_phrases.splitlines())
+            profile = database.create_topic_profile(
+                name, description, concept_phrases.splitlines(), search_concepts.splitlines(),
+            )
         except (ValueError, sqlite3.IntegrityError) as error:
             raise HTTPException(400, str(error)) from error
         return RedirectResponse(f"/topic-profiles/{profile.id}", status_code=303)
@@ -184,9 +187,13 @@ def create_app(
     def topic_profile_update(
         profile_id: int, name: str = Form(...), description: str = Form(""),
         concept_phrases: str = Form(...),
+        search_concepts: str | None = Form(None),
     ) -> RedirectResponse:
         try:
-            database.update_topic_profile(profile_id, name, description, concept_phrases.splitlines())
+            database.update_topic_profile(
+                profile_id, name, description, concept_phrases.splitlines(),
+                search_concepts.splitlines() if search_concepts is not None else None,
+            )
         except sqlite3.IntegrityError as error:
             raise HTTPException(400, str(error)) from error
         except ValueError as error:
