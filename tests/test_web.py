@@ -506,7 +506,7 @@ class WebTests(unittest.TestCase):
     def test_channel_zero_subscribers_is_not_missing(self) -> None:
         self.repository.upsert_channel(Channel("UC0", "Zero", subscriber_count=0))
         response = self.client.get("/channels/UC0")
-        self.assertIn("Subscribers: 0", response.text)
+        self.assertIn("<dt>Subscribers</dt><dd>0</dd>", response.text)
 
     def test_channel_metadata_fields_and_large_numbers_are_human_readable(self) -> None:
         self.repository.update_channel_metadata(ChannelMetadata("UC1", subscriber_count=1250000, view_count=9876543, video_count=42))
@@ -514,6 +514,25 @@ class WebTests(unittest.TestCase):
         self.assertIn("1,250,000", response.text)
         self.assertIn("9,876,543", response.text)
         self.assertIn("Reported videos", response.text)
+
+    def test_channels_source_links_prefer_persisted_url_and_fallback_without_network(self) -> None:
+        self.repository.upsert_channel(Channel("UCURL", "With URL", channel_url="https://www.youtube.com/@with-url"))
+        response = self.client.get("/channels")
+        self.assertIn('href="https://www.youtube.com/@with-url" target="_blank" rel="noopener noreferrer">YouTube', response.text)
+        self.assertIn('href="https://www.youtube.com/channel/UC1" target="_blank" rel="noopener noreferrer">YouTube', response.text)
+        self.assertIn('href="/channels/UC1">One</a>', response.text)
+
+    def test_channel_detail_source_and_metadata_timestamp_are_human_readable(self) -> None:
+        checked = datetime(2026, 8, 22, 10, 2, tzinfo=timezone.utc)
+        self.repository.update_channel_metadata(ChannelMetadata("UC1", checked_at=checked))
+        response = self.client.get("/channels/UC1")
+        self.assertIn("Channel ID:", response.text)
+        self.assertIn("Open on YouTube", response.text)
+        self.assertIn('href="https://www.youtube.com/channel/UC1" target="_blank" rel="noopener noreferrer"', response.text)
+        self.assertIn("2026-08-22 10:02 UTC", response.text)
+        unknown = self.client.get("/channels/UC2")
+        self.assertIn("Metadata checked", unknown.text)
+        self.assertIn("—", unknown.text)
 
     def test_channel_without_videos_has_empty_state(self) -> None:
         self.repository.upsert_channel(Channel("UC0", "Empty"))
