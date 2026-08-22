@@ -18,6 +18,16 @@ _POLICIES = {
     "broad": (0.25, 0.15),
 }
 _GENERIC_TOKENS = {"aging", "reality", "money", "life", "health", "news", "people", "living"}
+_TOKEN_VARIANT_FAMILIES = (
+    frozenset({"aging", "age", "ages", "ager", "agers"}),
+    frozenset({"living", "live", "lives"}),
+    frozenset({"adult", "adults"}),
+    frozenset({"senior", "seniors"}),
+    frozenset({"widow", "widows"}),
+)
+_TOKEN_VARIANTS = {
+    token: family for family in _TOKEN_VARIANT_FAMILIES for token in family
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,11 +97,7 @@ def _tokens(text: str) -> list[str]:
 
 
 def _token_forms(token: str) -> set[str]:
-    forms = {token}
-    if len(token) > 5 and token.endswith("ing"):
-        base = token[:-3]
-        forms.update((base, base + "e"))
-    return forms
+    return set(_TOKEN_VARIANTS.get(token, (token,)))
 
 
 def _ordered_phrase_match(text_tokens: list[str], concept_tokens: list[str]) -> bool:

@@ -147,6 +147,95 @@ class DiscoveryRelevanceTests(unittest.TestCase):
         self.assertTrue(evaluate_channel_topic(channel, "solo aging", ["living alone"], sample(9), "balanced").accepted)
         self.assertTrue(evaluate_channel_topic(channel, "solo aging", ["living alone"], sample(13), "strict").accepted)
 
+    def test_high_confidence_linguistic_variants_preserve_profile_label(self) -> None:
+        cases = (
+            ("Solo Agers: The Invisible Majority", "solo aging"),
+            ("Solo Ager Support Group", "solo aging"),
+            ("Unique Challenges Ages Alone", "aging alone"),
+            ("Unique Challenges Age Alone", "aging alone"),
+            ("Advice for Older Adults", "older adult"),
+            ("Support for Seniors", "senior"),
+            ("Widows Finding Community", "widow"),
+            ("Single Seniors After Retirement", "single senior"),
+        )
+        for title, concept in cases:
+            self.assertEqual(match_topic_concepts(title, [concept]), [concept], title)
+
+    def test_variant_matching_does_not_expand_generic_or_partial_concepts(self) -> None:
+        self.assertEqual(match_topic_concepts("Healthy Aging Study", ["aging"]), [])
+        self.assertEqual(match_topic_concepts("Living Alone", ["living"]), [])
+        self.assertEqual(match_topic_concepts("Solo", ["solo aging"]), [])
+        self.assertEqual(match_topic_concepts("Ager", ["solo aging"]), [])
+        self.assertEqual(match_topic_concepts("55+ Retirement Lifestyle", ["solo aging"]), [])
+        self.assertEqual(match_topic_concepts("Senior Advice", ["solo aging"]), [])
+
+    def test_variant_identity_uses_original_profile_concept(self) -> None:
+        result = evaluate_channel_topic(
+            Channel("UC1", "Solo Agers Network"),
+            "solo aging",
+            [],
+            ["Unrelated gardening"] * 20,
+            "balanced",
+        )
+        self.assertEqual(result.identity, "strong")
+        self.assertIn("solo aging", result.identity_evidence)
+
+    def test_real_positive_variant_fixture_improves_coverage_and_acceptance(self) -> None:
+        titles = [
+            "Solo Agers: The Invisible Majority",
+            "Technology for Comfort, Conversation, and Care for Solo Agers",
+            "Caregiving Challenges and Opportunities for Solo Agers",
+            "Unique Challenges Aging Alone",
+            "Solo Aging Membership Club",
+            "Solo Aging vs Traditional Family Structures",
+            "Kitchen tools review",
+            "A walk through my old town",
+            "Favorite books this month",
+            "Morning routine vlog",
+            "Family recipe collection",
+        ]
+        after = evaluate_channel_topic(Channel("UC1", "Solo Agers Network"), "solo aging", ["aging alone"], titles, "balanced")
+        literal_before = sum("solo aging" in title.casefold() for title in titles)
+        self.assertEqual(literal_before, 2)
+        self.assertEqual(after.topic_matches, 6)
+        self.assertLess(literal_before / len(titles), after.topic_coverage)
+        self.assertTrue(after.accepted)
+        self.assertEqual(after.title_evidence[0].matched_concepts, ["solo aging"])
+
+    def test_real_mixed_content_fixture_remains_rejected_balanced(self) -> None:
+        titles = [
+            "Solo Aging Membership Club",
+            "Unique Challenges Aging Alone",
+            "Living Alone After Retirement",
+            "I Had to Go to the ER by Myself",
+            "Stop Giving People Access to You",
+            "The 55+ Retirement Lifestyle Trap",
+            "When You Have Nothing Left to Give",
+            "I Visited My Old Town",
+            "They're Wrong",
+            "A Day in My Personal Story",
+            "Family Dinner and Memories",
+            "My Favorite Kitchen Tools",
+            "A Quiet Morning Walk",
+            "Traveling to See Friends",
+            "What I Learned This Week",
+            "How I Organize My Home",
+            "A New Book Review",
+            "Trying a New Recipe",
+            "Weekend Gardening",
+            "A Personal Update",
+        ]
+        result = evaluate_channel_topic(
+            Channel("UC1", "Personal Stories"),
+            "solo aging",
+            ["aging alone", "living alone"],
+            titles,
+            "balanced",
+        )
+        self.assertEqual(result.topic_matches, 3)
+        self.assertLess(result.topic_coverage, 0.40)
+        self.assertFalse(result.accepted)
+
 
 if __name__ == "__main__":
     unittest.main()
