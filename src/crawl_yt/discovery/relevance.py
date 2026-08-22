@@ -211,8 +211,14 @@ def evaluate_channel_topic(
     related_terms: Iterable[str],
     recent_video_titles: Iterable[str],
     mode: str = "balanced",
+    minimum_distinct_concepts: int | None = None,
 ) -> TopicEvidence:
     policy = get_topic_policy(mode)
+    if minimum_distinct_concepts is not None:
+        policy = TopicPolicy(
+            policy.mode, policy.coverage_threshold, policy.identity_floor,
+            minimum_distinct_concepts, policy.identity_min_topic_matches,
+        )
     query = " ".join(str(keyword).split()).casefold()
     query_tokens = _tokens(query)
     related = normalize_topic_terms(related_terms)

@@ -14,6 +14,7 @@ from .cadence import (
     CADENCE_PROBE_MAX_ENTRIES,
     CadenceProbe,
 )
+from .activity import DiscoverySearchResult
 from .channel_discovery import ChannelVerification, DiscoveryBatch
 
 
@@ -61,15 +62,24 @@ class YtDlpDiscoveryProvider:
         with YoutubeDL(options) as ydl:
             info = ydl.extract_info(f"ytsearch{limit}:{keyword}", download=False)
         entries = [entry for entry in (info or {}).get("entries", []) if entry]
-        channels = [
-            channel
-            for entry in entries
-            if (channel := normalize_channel(entry)) is not None
-        ]
+        channels = []
+        results = []
+        for entry in entries:
+            channel = normalize_channel(entry)
+            if channel is None:
+                continue
+            channels.append(channel)
+            video = normalize_video(entry, channel.channel_id)
+            results.append(DiscoverySearchResult(
+                channel,
+                video.video_id if video else str(entry.get("id") or "") or None,
+                video.published_at if video else published_at_from_entry(entry),
+            ))
         return DiscoveryBatch(
             search_results=len(entries),
             channels=channels,
             source="yt-dlp:ytsearch",
+            results=results,
         )
 
     def verify(self, channel: Channel, sample_size: int = 20) -> ChannelVerification:

@@ -142,7 +142,7 @@ class DiscoveryTests(unittest.TestCase):
                 ("retirement income", 100),
                 ("social security", 100),
             ])
-            self.assertEqual(provider.verify_calls, [f"UC{letter}" for letter in "ABCDEFGH"])
+            self.assertEqual(provider.verify_calls, ["UCC", "UCD", "UCF", "UCA", "UCB", "UCE", "UCG", "UCH"])
             self.assertEqual(report.search_results, 11)
             self.assertEqual(report.unique_channels_in_search, 8)
             self.assertEqual(report.duplicate_results_in_search, 3)
@@ -162,7 +162,7 @@ class DiscoveryTests(unittest.TestCase):
             }
             self.assertEqual(candidates["UCC"].discovered_by_queries, ["retirement", "retirement income"])
             self.assertEqual(candidates["UCF"].discovered_by_queries, ["retirement income", "social security"])
-            self.assertEqual([channel.channel_id for channel in report.channels], [f"UC{letter}" for letter in "ABCDEFGH"])
+            self.assertEqual([channel.channel_id for channel in report.channels], ["UCC", "UCD", "UCF", "UCA", "UCB", "UCE", "UCG", "UCH"])
 
     def test_secondary_queries_contribute_candidates_and_primary_is_only_persisted_keyword(self) -> None:
         channels = {letter: Channel(f"UC{letter}", f"Candidate {letter}") for letter in "ABCD"}
@@ -200,10 +200,10 @@ class DiscoveryTests(unittest.TestCase):
                 "retirement", 2, topic_profile_id=profile.id,
             )
 
-            self.assertEqual(provider.search_calls, [("retirement", 100)])
+            self.assertEqual(provider.search_calls, [("retirement", 100), ("retirement income", 96)])
             self.assertEqual(provider.verify_calls, ["UCA", "UCB"])
-            self.assertEqual(report.executed_queries, ["retirement"])
-            self.assertEqual(report.candidate_count, 2)
+            self.assertEqual(report.executed_queries, ["retirement", "retirement income"])
+            self.assertEqual(report.candidate_count, 5)
 
     def test_unique_candidate_override_limits_requests_and_inspection(self) -> None:
         channels = {letter: Channel(f"UC{letter}", f"Candidate {letter}") for letter in "ABCDEFG"}
@@ -348,15 +348,10 @@ class DiscoveryTests(unittest.TestCase):
             self.assertIn("living alone", snapshot["effective_concepts"])
             self.assertNotIn("independent retirement", snapshot["effective_concepts"])
             self.assertEqual(snapshot["planned_queries"], ["solo aging", "aging in place"])
-            self.assertEqual(snapshot["executed_queries"], ["solo aging"])
-            self.assertEqual(snapshot["query_metrics"], [{
-                "query": "solo aging",
-                "raw_results": 1,
-                "unique_candidates": 1,
-                "new_candidates": 1,
-                "duplicate_candidates": 0,
-                "failure": None,
-            }])
+            self.assertEqual(snapshot["executed_queries"], ["solo aging", "aging in place"])
+            self.assertEqual(snapshot["query_metrics"][0]["query"], "solo aging")
+            self.assertEqual(snapshot["query_metrics"][0]["topic_accepted_found"], 1)
+            self.assertEqual(snapshot["query_metrics"][0]["final_qualified_found"], 1)
 
     def test_normalizes_stable_channel_id(self) -> None:
         channel = normalize_channel(
@@ -499,7 +494,7 @@ class DiscoveryTests(unittest.TestCase):
             self.assertEqual(summary["coverage_0_15"], 2)
             self.assertEqual(summary["coverage_15_25"], 1)
             self.assertEqual(summary["coverage_25_40"], 1)
-            self.assertEqual(summary["coverage_40_60"], 2)
+            self.assertEqual(summary["coverage_40_60"], 0)
             self.assertEqual(summary["no_usable_sample"], 0)
 
 

@@ -16,6 +16,7 @@ from ..database.models import Video
 from ..database.repository import ChannelRepository
 from ..scoring_lifecycle import ChannelScoringLifecycle
 from .normalization import normalize_discovery_keyword
+from .activity import CandidateActivitySignal, DiscoverySearchResult, activity_hint, activity_priority_score
 from .cadence import (
     MIN_DISCOVERY_VIDEOS_PER_WEEK,
     CadenceProbe,
@@ -66,6 +67,7 @@ class DiscoveryBatch:
     search_results: int
     channels: list[Channel]
     source: str
+    results: list[DiscoverySearchResult] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -93,6 +95,11 @@ class DiscoveryQueryMetric:
     new_candidates: int = 0
     duplicate_candidates: int = 0
     failure: str | None = None
+    topic_accepted_found: int = 0
+    cadence_qualified_found: int = 0
+    final_qualified_found: int = 0
+    topic_accepted_first_discovered: int = 0
+    final_qualified_first_discovered: int = 0
 
 
 @dataclass(slots=True)
@@ -103,6 +110,7 @@ class DiscoveryCandidate:
     cadence: CadenceEvidence | None = None
     full_crawl_status: str = "not_run"
     final_status: str = "topic_rejected"
+    activity: CandidateActivitySignal = field(default_factory=CandidateActivitySignal)
 
 
 @dataclass(slots=True)
@@ -149,6 +157,9 @@ class DiscoveryReport:
     cadence_rejected_candidates: list[DiscoveryCandidate] = field(default_factory=list)
     cadence_insufficient_candidates: list[DiscoveryCandidate] = field(default_factory=list)
     final_failed_candidates: list[DiscoveryCandidate] = field(default_factory=list)
+    candidates_with_activity_signal: int = 0
+    candidates_with_recent_activity: int = 0
+    candidates_with_unknown_activity: int = 0
 
     def rejection_summary(self) -> dict[str, int]:
         summary = {
@@ -266,6 +277,10 @@ class DiscoveryService:
             profile.concept_phrases if profile else (),
             normalized_related,
         )
+        effective_minimum_distinct_concepts = min(
+            policy.minimum_distinct_concepts,
+            max(1, len(effective_concepts)),
+        )
         if maximum_candidates is not None and maximum_candidates < 1:
             raise ValueError("maximum candidates must be positive")
         candidate_cap = (
@@ -295,28 +310,37 @@ class DiscoveryService:
         query_metrics: list[DiscoveryQueryMetric] = []
         search_results = duplicate_results = cross_query_duplicates = 0
 
+        metric_by_query: dict[str, DiscoveryQueryMetric] = {}
+        discovery_order: dict[str, int] = {}
+        activity_by_id: dict[str, CandidateActivitySignal] = {}
+        source_by_id: dict[str, str] = {}
+
+        # Phase A-C: collect and merge the bounded pool before any expensive verification.
         for query_index, query in enumerate(planned_queries):
-            if len(accepted) >= limit or inspected >= candidate_cap:
-                break
             request_limit = min(DISCOVERY_PER_QUERY_BATCH_SIZE, candidate_cap - inspected)
+            if request_limit <= 0:
+                break
             executed_queries.append(query)
             try:
                 batch = self.provider.search(query, request_limit)
             except Exception as error:
                 if query_index == 0:
                     raise
-                query_metrics.append(DiscoveryQueryMetric(
-                    query, failure=str(error) or type(error).__name__,
-                ))
+                metric = DiscoveryQueryMetric(query, failure=str(error) or type(error).__name__)
+                query_metrics.append(metric)
+                metric_by_query[query] = metric
                 continue
             metric = DiscoveryQueryMetric(query, raw_results=batch.search_results)
+            metric_by_query[query] = metric
+            query_metrics.append(metric)
             search_results += batch.search_results
+            results = batch.results or [DiscoverySearchResult(channel) for channel in batch.channels[:request_limit]]
             query_channel_ids: set[str] = set()
-
-            for channel in batch.channels[:request_limit]:
-                if len(accepted) >= limit or inspected >= candidate_cap:
-                    break
+            for result in results[:request_limit]:
+                channel = result.channel
                 channel_id = channel.channel_id
+                signal = activity_by_id.setdefault(channel_id, CandidateActivitySignal())
+                signal.merge(result, query)
                 if channel_id in query_channel_ids:
                     metric.duplicate_candidates += 1
                     duplicate_results += 1
@@ -327,106 +351,131 @@ class DiscoveryService:
                     metric.duplicate_candidates += 1
                     duplicate_results += 1
                     cross_query_duplicates += 1
-                    candidates_by_id[channel_id].discovered_by_queries.append(query)
+                    if query not in candidates_by_id[channel_id].discovered_by_queries:
+                        candidates_by_id[channel_id].discovered_by_queries.append(query)
                     continue
-
+                if inspected >= candidate_cap:
+                    continue
                 unique[channel_id] = channel
+                source_by_id[channel_id] = batch.source
                 metric.new_candidates += 1
                 inspected += 1
-                verification = None
-                if not self.enforce_topic_gate:
-                    verified_channel = channel
-                    evidence = TopicEvidence(0, 0, 0.0, "none", "legacy", True, "legacy discovery")
-                else:
-                    try:
-                        verification = self.provider.verify(channel, DISCOVERY_TOPIC_SAMPLE_SIZE)
-                        verified_channel = verification.channel
-                        evidence = evaluate_channel_topic(
-                            verified_channel, search_query, effective_concepts,
-                            verification.recent_video_titles, policy.mode,
-                        )
-                    except Exception as error:
-                        evidence = TopicEvidence(0, 0, 0.0, "none", "none", False, f"verification_failed: {error}")
-                        verified_channel = channel
-                candidate = DiscoveryCandidate(verified_channel, evidence, [query])
-                candidates_by_id[channel_id] = candidate
-                if not evidence.accepted:
-                    candidate.final_status = "topic_rejected"
-                    rejected.append(candidate)
-                    continue
-                topic_accepted_candidates.append(candidate)
-                candidate.final_status = "cadence_pending"
-                cadence = (
-                    evaluate_cadence(MIN_DISCOVERY_VIDEOS_PER_WEEK)
-                    if not self.enforce_topic_gate
-                    else self._cadence_for_candidate(verified_channel, verification)
+                discovery_order[channel_id] = inspected
+                candidates_by_id[channel_id] = DiscoveryCandidate(
+                    channel, TopicEvidence(0, 0, 0.0, "none", "none", False, "pending"), [query],
+                    activity=signal,
                 )
-                candidate.cadence = cadence
-                if cadence.status is CadenceStatus.BELOW_TARGET:
-                    candidate.final_status = "cadence_rejected"
-                    cadence_rejected_candidates.append(candidate)
+
+        ranked_ids = sorted(
+            candidates_by_id,
+            key=lambda channel_id: (
+                -activity_priority_score(activity_by_id[channel_id]),
+                -(activity_by_id[channel_id].newest_observed_video_at.timestamp() if activity_by_id[channel_id].newest_observed_video_at else float("-inf")),
+                discovery_order[channel_id],
+                channel_id,
+            ),
+        )
+
+        def outcome(candidate: DiscoveryCandidate, field: str, first_field: str | None = None) -> None:
+            for index, query in enumerate(candidate.discovered_by_queries):
+                metric = metric_by_query.get(query)
+                if metric is None:
                     continue
-                if cadence.status is CadenceStatus.INSUFFICIENT_DATA:
-                    candidate.final_status = "cadence_insufficient"
-                    cadence_insufficient_candidates.append(candidate)
-                    continue
-                if cadence.status is CadenceStatus.FAILED:
-                    candidate.final_status = "cadence_failed"
-                    final_failed_candidates.append(candidate)
-                    continue
-                candidate.final_status = "cadence_qualified"
-                known = self.repository.get_channel(verified_channel.channel_id) is not None
-                if max_new_channels is not None and not known and new_channels >= max_new_channels:
-                    continue
-                if dry_run:
-                    candidate.full_crawl_status = "dry_run"
-                    candidate.final_status = "qualified"
-                    accepted.append(candidate)
-                    processed_channels.append(verified_channel)
-                    continue
-                if not known and self.initial_crawl_service is not None:
-                    self.repository.upsert_channel(verified_channel)
-                    try:
-                        self.initial_crawl_service.crawl(
-                            verified_channel.channel_id, full=True
-                        )
-                        candidate.full_crawl_status = "succeeded"
-                        full_crawled_count += 1
-                    except Exception as error:
-                        self.repository.remove_channel_admission(verified_channel.channel_id)
-                        candidate.full_crawl_status = "failed"
-                        candidate.final_status = "failed"
-                        candidate.cadence = evaluate_cadence(
-                            cadence.videos_per_week,
-                            videos_per_week_30d=cadence.videos_per_week_30d,
-                            videos_per_week_90d=cadence.videos_per_week_90d,
-                            failure=f"Initial Full Crawl failed: {error}",
-                        )
-                        final_failed_candidates.append(candidate)
-                        continue
-                elif not known:
-                    candidate.full_crawl_status = "not_configured"
-                else:
-                    candidate.full_crawl_status = "not_required"
+                setattr(metric, field, getattr(metric, field) + 1)
+                if index == 0 and first_field:
+                    setattr(metric, first_field, getattr(metric, first_field) + 1)
+
+        # Phase D-F: verify in activity order; authoritative cadence remains unchanged.
+        for channel_id in ranked_ids:
+            if len(accepted) >= limit:
+                break
+            candidate = candidates_by_id[channel_id]
+            channel = candidate.channel
+            verification = None
+            if not self.enforce_topic_gate:
+                verified_channel = channel
+                evidence = TopicEvidence(0, 0, 0.0, "none", "legacy", True, "legacy discovery")
+            else:
+                try:
+                    verification = self.provider.verify(channel, DISCOVERY_TOPIC_SAMPLE_SIZE)
+                    verified_channel = verification.channel
+                    evidence = evaluate_channel_topic(
+                        verified_channel, search_query, effective_concepts,
+                        verification.recent_video_titles, policy.mode,
+                        effective_minimum_distinct_concepts,
+                    )
+                except Exception as error:
+                    evidence = TopicEvidence(0, 0, 0.0, "none", "none", False, f"verification_failed: {error}")
+                    verified_channel = channel
+            candidate.channel = verified_channel
+            candidate.evidence = evidence
+            if not evidence.accepted:
+                candidate.final_status = "topic_rejected"
+                rejected.append(candidate)
+                continue
+            topic_accepted_candidates.append(candidate)
+            outcome(candidate, "topic_accepted_found", "topic_accepted_first_discovered")
+            candidate.final_status = "cadence_pending"
+            cadence = evaluate_cadence(MIN_DISCOVERY_VIDEOS_PER_WEEK) if not self.enforce_topic_gate else self._cadence_for_candidate(verified_channel, verification)
+            candidate.cadence = cadence
+            if cadence.status is CadenceStatus.BELOW_TARGET:
+                candidate.final_status = "cadence_rejected"
+                cadence_rejected_candidates.append(candidate)
+                continue
+            if cadence.status is CadenceStatus.INSUFFICIENT_DATA:
+                candidate.final_status = "cadence_insufficient"
+                cadence_insufficient_candidates.append(candidate)
+                continue
+            if cadence.status is CadenceStatus.FAILED:
+                candidate.final_status = "cadence_failed"
+                final_failed_candidates.append(candidate)
+                continue
+            outcome(candidate, "cadence_qualified_found")
+            candidate.final_status = "cadence_qualified"
+            known = self.repository.get_channel(verified_channel.channel_id) is not None
+            if max_new_channels is not None and not known and new_channels >= max_new_channels:
+                continue
+            if dry_run:
+                candidate.full_crawl_status = "dry_run"
                 candidate.final_status = "qualified"
                 accepted.append(candidate)
-                is_new_channel = not known
-                if is_new_channel:
-                    self.repository.upsert_channel(verified_channel)
-                is_new_relationship = self.repository.record_discovery(
-                    verified_channel.channel_id, provenance_keyword, batch.source
-                )
                 processed_channels.append(verified_channel)
-                score_repository = getattr(self.scoring_lifecycle, "repository", self.repository)
-                current_score = score_repository.get_channel_score(verified_channel.channel_id) if hasattr(score_repository, "get_channel_score") else None
-                if not dry_run and (is_new_channel or current_score is None or is_new_relationship):
-                    score_candidates.add(verified_channel.channel_id)
-                new_channels += is_new_channel
-                new_channel_ids.extend([verified_channel.channel_id] if is_new_channel else [])
-                existing_channels += not is_new_channel
-                new_relationships += is_new_relationship
-                existing_relationships += not is_new_relationship
-            query_metrics.append(metric)
+                outcome(candidate, "final_qualified_found", "final_qualified_first_discovered")
+                continue
+            if not known and self.initial_crawl_service is not None:
+                self.repository.upsert_channel(verified_channel)
+                try:
+                    self.initial_crawl_service.crawl(verified_channel.channel_id, full=True)
+                    candidate.full_crawl_status = "succeeded"
+                    full_crawled_count += 1
+                except Exception as error:
+                    self.repository.remove_channel_admission(verified_channel.channel_id)
+                    candidate.full_crawl_status = "failed"
+                    candidate.final_status = "failed"
+                    candidate.cadence = evaluate_cadence(cadence.videos_per_week, videos_per_week_30d=cadence.videos_per_week_30d, videos_per_week_90d=cadence.videos_per_week_90d, failure=f"Initial Full Crawl failed: {error}")
+                    final_failed_candidates.append(candidate)
+                    continue
+            elif not known:
+                candidate.full_crawl_status = "not_configured"
+            else:
+                candidate.full_crawl_status = "not_required"
+            candidate.final_status = "qualified"
+            accepted.append(candidate)
+            is_new_channel = not known
+            if is_new_channel:
+                self.repository.upsert_channel(verified_channel)
+            is_new_relationship = self.repository.record_discovery(verified_channel.channel_id, provenance_keyword, source_by_id[channel_id])
+            processed_channels.append(verified_channel)
+            outcome(candidate, "final_qualified_found", "final_qualified_first_discovered")
+            score_repository = getattr(self.scoring_lifecycle, "repository", self.repository)
+            current_score = score_repository.get_channel_score(verified_channel.channel_id) if hasattr(score_repository, "get_channel_score") else None
+            if not dry_run and (is_new_channel or current_score is None or is_new_relationship):
+                score_candidates.add(verified_channel.channel_id)
+            new_channels += is_new_channel
+            new_channel_ids.extend([verified_channel.channel_id] if is_new_channel else [])
+            existing_channels += not is_new_channel
+            new_relationships += is_new_relationship
+            existing_relationships += not is_new_relationship
 
         report = DiscoveryReport(
             search_results=search_results,
@@ -448,7 +497,7 @@ class DiscoveryService:
             target_accepted=limit,
             maximum_candidates=candidate_cap,
             coverage_threshold=policy.coverage_threshold,
-            minimum_distinct_concepts=policy.minimum_distinct_concepts,
+            minimum_distinct_concepts=effective_minimum_distinct_concepts,
             identity_floor=policy.identity_floor,
             topic_profile_id=profile.id if profile else None,
             topic_profile_name=profile.name if profile else None,
@@ -474,6 +523,18 @@ class DiscoveryService:
             cadence_rejected_candidates=cadence_rejected_candidates,
             cadence_insufficient_candidates=cadence_insufficient_candidates,
             final_failed_candidates=final_failed_candidates,
+            candidates_with_activity_signal=sum(
+                1 for item in candidates_by_id.values()
+                if item.activity.observed_result_count
+            ),
+            candidates_with_recent_activity=sum(
+                1 for item in candidates_by_id.values()
+                if activity_hint(item.activity) in {"VERY RECENT", "RECENT"}
+            ),
+            candidates_with_unknown_activity=sum(
+                1 for item in candidates_by_id.values()
+                if activity_hint(item.activity) == "UNKNOWN"
+            ),
         )
         if not dry_run:
             scoring = self.scoring_lifecycle.score_channels(score_candidates)
@@ -505,6 +566,9 @@ class DiscoveryService:
                     "final_qualified": report.final_qualified_count,
                     "coverage_threshold": report.coverage_threshold,
                     "minimum_distinct_concepts": report.minimum_distinct_concepts,
+                    "candidates_with_activity_signal": report.candidates_with_activity_signal,
+                    "candidates_with_recent_activity": report.candidates_with_recent_activity,
+                    "candidates_with_unknown_activity": report.candidates_with_unknown_activity,
                     "identity_floor": report.identity_floor,
                 },
                 candidate_evidence=(
@@ -560,6 +624,14 @@ def _candidate_payload(candidate: DiscoveryCandidate, accepted: bool) -> dict[st
         ),
         "full_crawl_status": candidate.full_crawl_status,
         "final_status": candidate.final_status,
+        "activity": {
+            "hint": activity_hint(candidate.activity),
+            "priority_score": activity_priority_score(candidate.activity),
+            "observed_result_count": candidate.activity.observed_result_count,
+            "distinct_observed_videos": candidate.activity.distinct_observed_videos,
+            "newest_observed_video_at": candidate.activity.newest_observed_video_at.isoformat() if candidate.activity.newest_observed_video_at else None,
+            "query_diversity": candidate.activity.query_diversity,
+        },
         "matched_concepts": evidence.matched_concepts,
         "title_evidence": [
             {"title": item.title, "matched_concepts": item.matched_concepts}
