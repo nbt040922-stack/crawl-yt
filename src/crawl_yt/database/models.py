@@ -35,6 +35,7 @@ class TopicProfile:
     name: str
     description: str
     concept_phrases: list[str]
+    search_concepts: list[str]
     created_at: datetime
     updated_at: datetime
 

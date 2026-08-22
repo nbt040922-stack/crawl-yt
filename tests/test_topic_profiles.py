@@ -21,13 +21,21 @@ class TopicProfileRepositoryTests(unittest.TestCase):
         profile = self.repository.create_topic_profile(
             "Solo Aging", "Independent later life",
             [" Living Alone ", "living   alone", "AGING ALONE", ".", "aging"],
+            [" Aging ", "aging", "Independent  Living "],
         )
         self.assertEqual(profile.concept_phrases, ["living alone", "aging alone"])
+        self.assertEqual(profile.search_concepts, ["aging", "independent living"])
         self.assertEqual(self.repository.get_topic_profile(profile.id).name, "Solo Aging")
         self.assertEqual([item.id for item in self.repository.list_topic_profiles()], [profile.id])
 
-        updated = self.repository.update_topic_profile(profile.id, "Solo Aging Updated", "", ["senior life"])
-        self.assertEqual((updated.name, updated.concept_phrases), ("Solo Aging Updated", ["senior life"]))
+        updated = self.repository.update_topic_profile(
+            profile.id, "Solo Aging Updated", "", ["senior life"],
+            ["Retirement Community", "retirement   community"],
+        )
+        self.assertEqual(
+            (updated.name, updated.concept_phrases, updated.search_concepts),
+            ("Solo Aging Updated", ["senior life"], ["retirement community"]),
+        )
         self.assertTrue(self.repository.delete_topic_profile(profile.id))
         self.assertIsNone(self.repository.get_topic_profile(profile.id))
 

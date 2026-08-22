@@ -92,6 +92,43 @@ class RepositoryTests(unittest.TestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             self.repository.record_discovery("UC-missing", "retirement", "test")
 
+    def test_topic_profile_migration_preserves_legacy_matching_concepts(self) -> None:
+        self.temporary_directory.cleanup()
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.temporary_directory.name) / "legacy.db"
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.execute(
+                """CREATE TABLE topic_profiles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                    description TEXT NOT NULL DEFAULT '',
+                    concept_phrases_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )"""
+            )
+            connection.execute(
+                """INSERT INTO topic_profiles
+                   (name, description, concept_phrases_json, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    "Legacy Solo Aging", "", '["living alone"]',
+                    "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00",
+                ),
+            )
+            connection.commit()
+
+        self.repository = ChannelRepository(self.database_path)
+        legacy = self.repository.get_topic_profile(1)
+        self.assertEqual(legacy.concept_phrases, ["living alone"])
+        self.assertEqual(legacy.search_concepts, [])
+        with self.repository._connect() as connection:
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(topic_profiles)").fetchall()
+            }
+        self.assertIn("search_concepts_json", columns)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -243,6 +243,7 @@ class ChannelRepository:
                     name TEXT NOT NULL COLLATE NOCASE UNIQUE,
                     description TEXT NOT NULL DEFAULT '',
                     concept_phrases_json TEXT NOT NULL,
+                    search_concepts_json TEXT NOT NULL DEFAULT '[]',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -405,6 +406,15 @@ class ChannelRepository:
             }
             if "metadata_checked_at" not in channel_columns:
                 connection.execute("ALTER TABLE channels ADD COLUMN metadata_checked_at TEXT")
+            topic_profile_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(topic_profiles)").fetchall()
+            }
+            if "search_concepts_json" not in topic_profile_columns:
+                connection.execute(
+                    "ALTER TABLE topic_profiles "
+                    "ADD COLUMN search_concepts_json TEXT NOT NULL DEFAULT '[]'"
+                )
 
     def upsert_channel(self, channel: Channel) -> bool:
         """Upsert canonical metadata, returning True only for a new channel."""
@@ -467,7 +477,8 @@ class ChannelRepository:
         return cursor.rowcount == 1
 
     def create_topic_profile(
-        self, name: str, description: str, concept_phrases: list[str]
+        self, name: str, description: str, concept_phrases: list[str],
+        search_concepts: list[str] | None = None,
     ) -> TopicProfile:
         normalized_name = " ".join(name.split())
         concepts = [
@@ -478,13 +489,16 @@ class ChannelRepository:
             raise ValueError("topic profile name is required")
         if not concepts:
             raise ValueError("at least one meaningful concept is required")
+        normalized_search_concepts = normalize_topic_terms(search_concepts or [])
         now = datetime.now(timezone.utc)
         with self._connect() as connection:
             cursor = connection.execute(
                 """INSERT INTO topic_profiles
-                   (name, description, concept_phrases_json, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?)""",
+                   (name, description, concept_phrases_json, search_concepts_json,
+                    created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
                 (normalized_name, description.strip(), json.dumps(concepts),
+                 json.dumps(normalized_search_concepts),
                  self._timestamp(now), self._timestamp(now)),
             )
         return self.get_topic_profile(int(cursor.lastrowid))
@@ -505,7 +519,7 @@ class ChannelRepository:
 
     def update_topic_profile(
         self, profile_id: int, name: str, description: str,
-        concept_phrases: list[str],
+        concept_phrases: list[str], search_concepts: list[str] | None = None,
     ) -> TopicProfile:
         normalized_name = " ".join(name.split())
         concepts = [
@@ -516,11 +530,14 @@ class ChannelRepository:
             raise ValueError("topic profile name is required")
         if not concepts:
             raise ValueError("at least one meaningful concept is required")
+        normalized_search_concepts = normalize_topic_terms(search_concepts or [])
         with self._connect() as connection:
             cursor = connection.execute(
                 """UPDATE topic_profiles SET name = ?, description = ?,
-                   concept_phrases_json = ?, updated_at = ? WHERE id = ?""",
+                   concept_phrases_json = ?, search_concepts_json = ?, updated_at = ?
+                   WHERE id = ?""",
                 (normalized_name, description.strip(), json.dumps(concepts),
+                 json.dumps(normalized_search_concepts),
                  self._timestamp(datetime.now(timezone.utc)), profile_id),
             )
         if cursor.rowcount != 1:
@@ -1104,6 +1121,7 @@ class ChannelRepository:
             name=row["name"],
             description=row["description"],
             concept_phrases=list(json.loads(row["concept_phrases_json"])),
+            search_concepts=list(json.loads(row["search_concepts_json"])),
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
