@@ -13,9 +13,9 @@ DISCOVERY_TOPIC_SAMPLE_SIZE = 20
 MAX_CANDIDATE_MULTIPLIER = 5
 
 _POLICIES = {
-    "strict": (0.60, 0.40),
-    "balanced": (0.40, 0.25),
-    "broad": (0.25, 0.15),
+    "strict": (0.40, 0.30, 2, 2),
+    "balanced": (0.20, 0.15, 2, 2),
+    "broad": (0.10, 0.05, 2, 2),
 }
 _GENERIC_TOKENS = {"aging", "reality", "money", "life", "health", "news", "people", "living"}
 _TOKEN_VARIANT_FAMILIES = (
@@ -35,6 +35,8 @@ class TopicPolicy:
     mode: str
     coverage_threshold: float
     identity_floor: float
+    minimum_distinct_concepts: int
+    identity_min_topic_matches: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +50,7 @@ class TopicEvidence:
     reason: str
     matched_concepts: list[str] = field(default_factory=list)
     title_evidence: list["TitleTopicEvidence"] = field(default_factory=list)
+    distinct_matched_concepts: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,8 +91,8 @@ def get_topic_policy(mode: str) -> TopicPolicy:
     normalized = " ".join(str(mode).split()).casefold() or "balanced"
     if normalized not in _POLICIES:
         raise ValueError("mode must be strict, balanced, or broad")
-    coverage, floor = _POLICIES[normalized]
-    return TopicPolicy(normalized, coverage, floor)
+    coverage, floor, diversity, identity_matches = _POLICIES[normalized]
+    return TopicPolicy(normalized, coverage, floor, diversity, identity_matches)
 
 
 def _tokens(text: str) -> list[str]:
@@ -166,6 +169,42 @@ def _identity(channel: Channel, phrases: list[str], query_tokens: list[str]) -> 
     return "none", "none"
 
 
+def _acceptance_reason(
+    policy: TopicPolicy,
+    sample_size: int,
+    topic_matches: int,
+    topic_coverage: float,
+    identity: str,
+    distinct_matched_concepts: int,
+) -> tuple[bool, str]:
+    if sample_size == 0:
+        return False, "verification returned no recent video titles"
+    if (
+        identity == "strong"
+        and topic_matches < policy.identity_min_topic_matches
+    ):
+        return False, "Strong identity present, but insufficient matching-video evidence."
+    if (
+        topic_coverage >= policy.coverage_threshold
+        and distinct_matched_concepts >= policy.minimum_distinct_concepts
+    ):
+        return True, "coverage threshold and concept diversity met"
+    if (
+        identity == "strong"
+        and topic_coverage >= policy.identity_floor
+        and topic_matches >= policy.identity_min_topic_matches
+        and distinct_matched_concepts >= 1
+    ):
+        return True, "strong identity exception"
+    if topic_coverage >= policy.coverage_threshold:
+        return False, (
+            f"Coverage passed {policy.mode.title()} threshold, but topic evidence "
+            f"matched only {distinct_matched_concepts} distinct concept"
+            f"{'s' if distinct_matched_concepts != 1 else ''}."
+        )
+    return False, f"Coverage below {policy.mode.title()} minimum."
+
+
 def evaluate_channel_topic(
     channel: Channel,
     keyword: str,
@@ -187,22 +226,15 @@ def evaluate_channel_topic(
     sample_size = len(titles)
     coverage = matches / sample_size if sample_size else 0.0
     identity, identity_evidence = _identity(channel, phrases, query_tokens)
-    accepted = coverage >= policy.coverage_threshold or (
-        identity == "strong" and coverage >= policy.identity_floor
-    )
-    if accepted:
-        reason = "coverage threshold met" if coverage >= policy.coverage_threshold else "strong identity exception"
-    elif sample_size == 0:
-        reason = "verification returned no recent video titles"
-    elif identity == "strong" and coverage < policy.identity_floor:
-        reason = "channel identity matched but recent video coverage is too low"
-    else:
-        reason = "topic appears only in isolated or insufficient recent videos"
     concept_counts = Counter(
         concept for item in title_evidence for concept in item.matched_concepts
     )
     matched_concepts = [concept for concept, _ in concept_counts.most_common()]
+    distinct_matched_concepts = len(matched_concepts)
+    accepted, reason = _acceptance_reason(
+        policy, sample_size, matches, coverage, identity, distinct_matched_concepts,
+    )
     return TopicEvidence(
         sample_size, matches, coverage, identity, identity_evidence, accepted,
-        reason, matched_concepts, title_evidence,
+        reason, matched_concepts, title_evidence, distinct_matched_concepts,
     )

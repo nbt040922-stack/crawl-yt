@@ -41,7 +41,7 @@ class DiscoveryTests(unittest.TestCase):
                 if fail_ids and channel.channel_id in fail_ids:
                     raise RuntimeError("verification unavailable")
                 count = matches[channel.channel_id] if isinstance(matches, dict) else matches
-                titles = [f"{self.keyword} guide"] * count + ["Unrelated gardening"] * (sample_size - count)
+                titles = [f"{self.keyword} planning"] * count + ["Unrelated gardening"] * (sample_size - count)
                 return ChannelVerification(channel, titles)
 
         return Provider()
@@ -75,8 +75,8 @@ class DiscoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             repository = VideoRepository(Path(directory) / "test.db")
             service = DiscoveryService(FakeProvider(), repository)
-            first = service.discover("retirement")
-            second = service.discover("social security")
+            first = service.discover("retirement", related_terms=["planning"])
+            second = service.discover("social security", related_terms=["planning"])
 
             self.assertEqual(first.duplicate_results_in_search, 1)
             self.assertEqual(first.new_channels, 1)
@@ -101,9 +101,9 @@ class DiscoveryTests(unittest.TestCase):
             repository = VideoRepository(Path(directory) / "test.db")
             lifecycle = Lifecycle(repository)
             service = DiscoveryService(FakeProvider(), repository, lifecycle)
-            first = service.discover("retirement")
-            second = service.discover("retirement")
-            third = service.discover("social security")
+            first = service.discover("retirement", related_terms=["planning"])
+            second = service.discover("retirement", related_terms=["planning"])
+            third = service.discover("social security", related_terms=["planning"])
             self.assertEqual(first.channels_scored, 1)
             self.assertEqual(second.channels_scored, 0)
             self.assertEqual(third.channels_scored, 1)
@@ -116,7 +116,7 @@ class DiscoveryTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             repository = ChannelRepository(Path(directory) / "test.db")
-            report = DiscoveryService(FakeProvider(), repository, Lifecycle()).discover("retirement", dry_run=True)
+            report = DiscoveryService(FakeProvider(), repository, Lifecycle()).discover("retirement", related_terms=["planning"], dry_run=True)
             self.assertEqual(report.channels_scored, 0)
             self.assertEqual(repository.count_channels(), 0)
 
@@ -127,7 +127,7 @@ class DiscoveryTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             repository = ChannelRepository(Path(directory) / "test.db")
-            report = DiscoveryService(FakeProvider(), repository, Lifecycle()).discover("retirement")
+            report = DiscoveryService(FakeProvider(), repository, Lifecycle()).discover("retirement", related_terms=["planning"])
             self.assertEqual(report.new_channels, 1)
             self.assertEqual(report.scoring_failures, [("UC123", "score failed")])
 
@@ -135,9 +135,9 @@ class DiscoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             repository = ChannelRepository(Path(directory) / "test.db")
             provider = self._provider([Channel("UC1", "Candidate")], matches=1)
-            report = DiscoveryService(provider, repository).discover("retirement", 1)
+            report = DiscoveryService(provider, repository).discover("retirement", 1, related_terms=["planning"])
             self.assertEqual(report.accepted_count, 0)
-            self.assertEqual(report.rejected_candidates[0].evidence.reason, "topic appears only in isolated or insufficient recent videos")
+            self.assertEqual(report.rejected_candidates[0].evidence.reason, "Coverage below Balanced minimum.")
             self.assertIsNone(repository.get_channel("UC1"))
 
     def test_existing_rejected_channel_gets_no_new_provenance(self) -> None:
@@ -145,7 +145,7 @@ class DiscoveryTests(unittest.TestCase):
             repository = ChannelRepository(Path(directory) / "test.db")
             repository.upsert_channel(Channel("UC1", "Existing"))
             provider = self._provider([Channel("UC1", "Existing")], matches=2)
-            report = DiscoveryService(provider, repository).discover("retirement", 1)
+            report = DiscoveryService(provider, repository).discover("retirement", 1, related_terms=["planning"])
             self.assertEqual(report.rejected_count, 1)
             self.assertEqual(repository.count_discovery_relationships(), 0)
 
@@ -154,7 +154,7 @@ class DiscoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             repository = ChannelRepository(Path(directory) / "test.db")
             provider = self._provider(channels, matches={"UC1": 1, "UC2": 1, "UC3": 20, "UC4": 20})
-            report = DiscoveryService(provider, repository).discover("retirement", 2)
+            report = DiscoveryService(provider, repository).discover("retirement", 2, related_terms=["planning"])
             self.assertEqual(report.accepted_count, 2)
             self.assertEqual(provider.verify_calls, ["UC1", "UC2", "UC3", "UC4"])
 
@@ -163,7 +163,7 @@ class DiscoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             repository = ChannelRepository(Path(directory) / "test.db")
             provider = self._provider([channel, channel, channel], matches=20)
-            report = DiscoveryService(provider, repository).discover("retirement", 1)
+            report = DiscoveryService(provider, repository).discover("retirement", 1, related_terms=["planning"])
             self.assertEqual(report.unique_channels_in_search, 1)
             self.assertEqual(provider.verify_calls, ["UC1"])
 
@@ -172,7 +172,7 @@ class DiscoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             repository = ChannelRepository(Path(directory) / "test.db")
             provider = self._provider(channels, matches=20, fail_ids={"UC1"})
-            report = DiscoveryService(provider, repository).discover("retirement", 1)
+            report = DiscoveryService(provider, repository).discover("retirement", 1, related_terms=["planning"])
             self.assertEqual(report.accepted_count, 1)
             self.assertIn("verification_failed", report.rejected_candidates[0].evidence.reason)
             self.assertIsNotNone(repository.get_channel("UC2"))

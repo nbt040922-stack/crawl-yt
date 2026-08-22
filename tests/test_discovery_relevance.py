@@ -7,36 +7,103 @@ from src.crawl_yt.discovery.relevance import (
     DISCOVERY_TOPIC_SAMPLE_SIZE,
     build_effective_concepts,
     evaluate_channel_topic,
+    get_topic_policy,
     match_topic_concepts,
 )
 
 
 def titles(matching: int, total: int = 20) -> list[str]:
-    return ["Solo retirement planning" if i < matching else "Garden tools review" for i in range(total)]
+    return [
+        ("Solo retirement planning" if i % 2 == 0 else "Living alone retirement")
+        if i < matching else "Garden tools review"
+        for i in range(total)
+    ]
 
 
 class DiscoveryRelevanceTests(unittest.TestCase):
+    def _diverse_titles(self, matching: int, total: int = 20) -> list[str]:
+        matched = ["Retirement planning" if index % 2 == 0 else "Living alone tips" for index in range(matching)]
+        return matched + ["Garden tools review"] * (total - matching)
+
+    def test_calibrated_policies_and_diversity_thresholds(self) -> None:
+        self.assertEqual(get_topic_policy("strict").coverage_threshold, 0.40)
+        self.assertEqual(get_topic_policy("balanced").coverage_threshold, 0.20)
+        self.assertEqual(get_topic_policy("broad").coverage_threshold, 0.10)
+        for mode, matching, expected in (("strict", 8, True), ("strict", 7, False), ("balanced", 4, True), ("balanced", 3, False), ("broad", 2, True)):
+            result = evaluate_channel_topic(Channel("UC1", "Unrelated"), "retirement", ["living alone"], self._diverse_titles(matching), mode)
+            self.assertEqual(result.accepted, expected, (mode, matching))
+            self.assertEqual(result.distinct_matched_concepts, 2 if matching else 0)
+
+    def test_balanced_rejects_single_concept_at_new_boundary(self) -> None:
+        result = evaluate_channel_topic(
+            Channel("UC1", "Unrelated"), "retirement", ["senior life"],
+            ["Senior Life"] * 4 + ["Garden tools review"] * 16, "balanced",
+        )
+        self.assertEqual((result.topic_matches, result.distinct_matched_concepts), (4, 1))
+        self.assertFalse(result.accepted)
+        self.assertIn("1 distinct concept", result.reason)
+
+    def test_balanced_identity_exception_requires_nonzero_video_evidence(self) -> None:
+        channel = Channel("UC1", "Solo Aging Network")
+        accepted = evaluate_channel_topic(
+            channel, "solo aging", ["living alone"],
+            ["Solo aging planning", "Living alone tips", "Living alone support"] + ["Garden tools review"] * 17,
+            "balanced",
+        )
+        rejected = evaluate_channel_topic(
+            channel, "solo aging", ["living alone"],
+            ["Solo aging planning"] + ["Garden tools review"] * 19, "balanced",
+        )
+        self.assertTrue(accepted.accepted)
+        self.assertEqual(accepted.topic_matches, 3)
+        self.assertTrue(rejected.identity == "strong")
+        self.assertFalse(rejected.accepted)
+        self.assertIn("insufficient matching-video evidence", rejected.reason)
+
+    def test_strict_identity_exception_and_broad_diversity_boundary(self) -> None:
+        strict = evaluate_channel_topic(
+            Channel("UC1", "Solo Aging Network"), "solo aging", ["living alone"],
+            ["Solo aging planning", "Living alone tips"] * 3 + ["Garden tools review"] * 14,
+            "strict",
+        )
+        broad_single = evaluate_channel_topic(
+            Channel("UC2", "Unrelated"), "retirement", ["senior life"],
+            ["Senior Life"] * 2 + ["Garden tools review"] * 18, "broad",
+        )
+        self.assertTrue(strict.accepted)
+        self.assertEqual(strict.topic_coverage, 0.30)
+        self.assertFalse(broad_single.accepted)
+
+    def test_below_threshold_reason_is_explicit(self) -> None:
+        result = evaluate_channel_topic(
+            Channel("UC1", "Unrelated"), "retirement", ["living alone"],
+            self._diverse_titles(3), "balanced",
+        )
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.reason, "Coverage below Balanced minimum.")
+
     def test_balanced_boundaries(self) -> None:
-        self.assertTrue(evaluate_channel_topic(Channel("UC1", "Gardening"), "retirement", [], titles(8), "balanced").accepted)
-        self.assertFalse(evaluate_channel_topic(Channel("UC2", "Gardening"), "retirement", [], titles(7), "balanced").accepted)
+        self.assertTrue(evaluate_channel_topic(Channel("UC1", "Gardening"), "retirement", ["living alone"], titles(4), "balanced").accepted)
+        self.assertFalse(evaluate_channel_topic(Channel("UC2", "Gardening"), "retirement", ["living alone"], titles(3), "balanced").accepted)
         self.assertEqual(DISCOVERY_TOPIC_SAMPLE_SIZE, 20)
 
     def test_mode_boundaries(self) -> None:
-        self.assertTrue(evaluate_channel_topic(Channel("UC1", "Gardening"), "retirement", [], titles(12), "strict").accepted)
-        self.assertFalse(evaluate_channel_topic(Channel("UC2", "Gardening"), "retirement", [], titles(11), "strict").accepted)
-        self.assertTrue(evaluate_channel_topic(Channel("UC3", "Gardening"), "retirement", [], titles(5), "broad").accepted)
-        self.assertFalse(evaluate_channel_topic(Channel("UC4", "Gardening"), "retirement", [], titles(4), "broad").accepted)
+        self.assertTrue(evaluate_channel_topic(Channel("UC1", "Gardening"), "retirement", ["living alone"], titles(8), "strict").accepted)
+        self.assertFalse(evaluate_channel_topic(Channel("UC2", "Gardening"), "retirement", ["living alone"], titles(7), "strict").accepted)
+        self.assertTrue(evaluate_channel_topic(Channel("UC3", "Gardening"), "retirement", ["living alone"], titles(2), "broad").accepted)
+        self.assertFalse(evaluate_channel_topic(Channel("UC4", "Gardening"), "retirement", ["living alone"], titles(1), "broad").accepted)
 
     def test_identity_exception_requires_floor(self) -> None:
         channel = Channel("UC1", "Solo Aging Life", description="Advice for seniors aging alone and planning retirement independently")
-        relevant_titles = ["Solo aging planning"] * 5 + ["Garden tools review"] * 15
+        relevant_titles = ["Solo aging planning", "Living alone tips"] * 3 + ["Garden tools review"] * 14
         low_titles = ["Solo aging planning"] + ["Garden tools review"] * 19
-        self.assertTrue(evaluate_channel_topic(channel, "solo aging", [], relevant_titles, "balanced").accepted)
-        self.assertFalse(evaluate_channel_topic(channel, "solo aging", [], low_titles, "balanced").accepted)
+        self.assertTrue(evaluate_channel_topic(channel, "solo aging", ["living alone"], relevant_titles, "balanced").accepted)
+        self.assertFalse(evaluate_channel_topic(channel, "solo aging", ["living alone"], low_titles, "balanced").accepted)
 
     def test_related_terms_and_generic_token_protection(self) -> None:
         related = ["living alone", "aging alone", "solo retirement"]
-        self.assertTrue(evaluate_channel_topic(Channel("UC1", "Life"), "solo aging", related, ["Living alone after 60"] * 14 + ["Money news"] * 6, "balanced").accepted)
+        related_titles = ["Living alone after 60"] * 7 + ["Aging alone after 60"] * 7 + ["Money news"] * 6
+        self.assertTrue(evaluate_channel_topic(Channel("UC1", "Life"), "solo aging", related, related_titles, "balanced").accepted)
         generic = evaluate_channel_topic(Channel("UC2", "Life"), "solo aging", [], ["Aging population statistics"] * 20, "balanced")
         self.assertFalse(generic.accepted)
 
@@ -50,10 +117,10 @@ class DiscoveryRelevanceTests(unittest.TestCase):
 
     def test_explicit_related_phrase_and_multiword_query_still_match(self) -> None:
         primary = evaluate_channel_topic(
-            Channel("UC1", "Unrelated"), "solo aging", [], ["The Reality of Solo Aging"] * 20, "balanced"
+            Channel("UC1", "Unrelated"), "solo aging", ["aging alone"], ["The Reality of Solo Aging"] * 10 + ["Aging Alone Planning"] * 10, "balanced"
         )
         related = evaluate_channel_topic(
-            Channel("UC2", "Unrelated"), "aging", ["aging alone"], ["The Reality of Aging Alone"] * 20, "balanced"
+            Channel("UC2", "Unrelated"), "aging", ["aging alone", "solo retirement"], ["The Reality of Aging Alone"] * 10 + ["Solo Retirement Planning"] * 10, "balanced"
         )
         self.assertTrue(primary.accepted)
         self.assertTrue(related.accepted)
@@ -142,10 +209,10 @@ class DiscoveryRelevanceTests(unittest.TestCase):
 
     def test_profile_concepts_do_not_change_mode_thresholds(self) -> None:
         channel = Channel("UC1", "Unrelated")
-        sample = lambda count: ["Living alone after 65"] * count + ["Garden tour"] * (20 - count)
-        self.assertFalse(evaluate_channel_topic(channel, "solo aging", ["living alone"], sample(7), "balanced").accepted)
-        self.assertTrue(evaluate_channel_topic(channel, "solo aging", ["living alone"], sample(9), "balanced").accepted)
-        self.assertTrue(evaluate_channel_topic(channel, "solo aging", ["living alone"], sample(13), "strict").accepted)
+        sample = lambda count: ["Living alone after 65" if index % 2 == 0 else "Aging alone after 65" for index in range(count)] + ["Garden tour"] * (20 - count)
+        self.assertFalse(evaluate_channel_topic(channel, "solo aging", ["living alone", "aging alone"], sample(3), "balanced").accepted)
+        self.assertTrue(evaluate_channel_topic(channel, "solo aging", ["living alone", "aging alone"], sample(4), "balanced").accepted)
+        self.assertTrue(evaluate_channel_topic(channel, "solo aging", ["living alone", "aging alone"], sample(8), "strict").accepted)
 
     def test_high_confidence_linguistic_variants_preserve_profile_label(self) -> None:
         cases = (

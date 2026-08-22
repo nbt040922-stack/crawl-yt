@@ -63,6 +63,7 @@ class TopicProfileRepositoryTests(unittest.TestCase):
         self.assertNotIn("independent retirement", snapshot["effective_concepts"])
         evidence = snapshot["candidate_evidence"][0]
         self.assertEqual(evidence["matched_concepts"], ["living alone"])
+        self.assertEqual(evidence["distinct_matched_concepts"], 1)
         self.assertEqual(evidence["title_evidence"][0], {
             "title": "Why I enjoy living alone",
             "matched_concepts": ["living alone"],
@@ -100,7 +101,7 @@ class TopicProfileRepositoryTests(unittest.TestCase):
 
             def verify(self, channel, sample_size=20):
                 self.verify_calls.append((channel.channel_id, sample_size))
-                titles = ["Living alone after 65"] * 13 + ["Garden tour"] * 7
+                titles = ["Living alone after 65"] * 7 + ["Independent aging at home"] * 6 + ["Garden tour"] * 7
                 return ChannelVerification(channel, titles)
 
         profile = self.repository.create_topic_profile("Solo Aging", "", ["living alone"])

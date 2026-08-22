@@ -59,7 +59,8 @@ class ModeDiscoveryFake:
         return DiscoveryBatch(100, [Channel("UCMODE", "Mode Candidate")], "fake")
 
     def verify(self, channel, sample_size=20):
-        return ChannelVerification(channel, [f"{self.keyword} planning"] * self.matches + ["Unrelated topic"] * (sample_size - self.matches))
+        titles = [f"{self.keyword} planning" if index % 2 == 0 else "Living alone tips" for index in range(self.matches)]
+        return ChannelVerification(channel, titles + ["Unrelated topic"] * (sample_size - self.matches))
 
 
 class EmptySampleDiscoveryFake:
@@ -332,12 +333,12 @@ class WebTests(unittest.TestCase):
         app_client = TestClient(create_app(repository=self.repository, discovery_provider=provider))
         self.assertEqual(app_client.get("/discovery").status_code, 200)
         self.assertEqual(provider.calls, [])
-        self.assertEqual(app_client.post("/discovery", data={"keyword": "retirement", "limit": "1"}).status_code, 200)
+        self.assertEqual(app_client.post("/discovery", data={"keyword": "retirement", "limit": "1", "related_terms": "planning"}).status_code, 200)
         self.assertEqual(provider.calls, [("retirement", 5)])
 
     def test_discovery_result_is_structured_and_labels_statuses(self) -> None:
         provider = DiscoveryFake()
-        response = TestClient(create_app(repository=self.repository, discovery_provider=provider)).post("/discovery", data={"keyword": "retirement", "limit": "20"})
+        response = TestClient(create_app(repository=self.repository, discovery_provider=provider)).post("/discovery", data={"keyword": "retirement", "limit": "20", "related_terms": "planning"})
         self.assertEqual(response.status_code, 200)
         self.assertNotIn("DiscoveryReport(", response.text)
         for label in ("Search results", "Unique channels", "Duplicate results in search", "New channels", "Existing channels", "New discovery relationships", "Existing discovery relations"):
@@ -359,7 +360,7 @@ class WebTests(unittest.TestCase):
         self.assertNotIn("DiscoveryReport(", response.text)
 
     def test_discovery_dry_run_notice_and_discovered_status(self) -> None:
-        response = TestClient(create_app(repository=self.repository, discovery_provider=DiscoveryFake())).post("/discovery", data={"keyword": "retirement", "limit": "20", "dry_run": "true"})
+        response = TestClient(create_app(repository=self.repository, discovery_provider=DiscoveryFake())).post("/discovery", data={"keyword": "retirement", "limit": "20", "related_terms": "planning", "dry_run": "true"})
         self.assertEqual(response.status_code, 200)
         self.assertIn("Dry run — nothing was written to the database.", response.text)
         self.assertIn("Discovered", response.text)
@@ -369,7 +370,7 @@ class WebTests(unittest.TestCase):
             "/discovery", data={"keyword": "retirement", "limit": "2", "mode": "strict", "related_terms": "planning, PLANNING"}
         )
         self.assertEqual(response.status_code, 200)
-        for label in ("Candidates found", "Accepted", "Rejected", "Mode", "Minimum coverage", "Accepted", "Rejected candidates", "Topic coverage", "Matched sample", "Identity", "Evidence"):
+        for label in ("Candidates found", "Accepted", "Rejected", "Mode", "Minimum coverage", "Minimum distinct concepts", "Distinct concepts", "Strong identity floor", "Accepted", "Rejected candidates", "Topic coverage", "Matched sample", "Identity", "Reason", "Evidence"):
             self.assertIn(label, response.text)
         self.assertIn("Extra concepts: planning", response.text)
         self.assertIn("Accepted", response.text)
@@ -382,14 +383,19 @@ class WebTests(unittest.TestCase):
         self.assertIn("Discovery may inspect more candidates to find this many relevant channels.", response.text)
 
     def test_discovery_mode_propagates_through_web_boundary(self) -> None:
-        for mode, matches, accepted in (("strict", 6, 0), ("balanced", 6, 0), ("broad", 6, 1), ("strict", 9, 0), ("balanced", 9, 1), ("broad", 9, 1), ("strict", 13, 1), ("balanced", 13, 1), ("broad", 13, 1)):
+        for mode, matches, accepted in (("strict", 6, 0), ("balanced", 6, 1), ("broad", 6, 1), ("strict", 9, 1), ("balanced", 9, 1), ("broad", 9, 1), ("strict", 13, 1), ("balanced", 13, 1), ("broad", 13, 1)):
             provider = ModeDiscoveryFake(matches)
             response = TestClient(create_app(repository=self.repository, discovery_provider=provider)).post(
-                "/discovery", data={"keyword": "retirement", "limit": "1", "mode": mode}
+                "/discovery", data={"keyword": "retirement", "limit": "1", "mode": mode, "related_terms": "living alone"}
             )
             self.assertEqual(response.status_code, 200)
             self.assertIn(f"<strong>{mode.title()}</strong>", response.text)
             self.assertIn(f"<span>Accepted</span><strong>{accepted}</strong>", response.text)
+            minimum = {"strict": 40, "balanced": 20, "broad": 10}[mode]
+            identity_floor = {"strict": 30, "balanced": 15, "broad": 5}[mode]
+            self.assertIn(f"<span>Minimum coverage</span><strong>{minimum}%</strong>", response.text)
+            self.assertIn("<span>Minimum distinct concepts</span><strong>2</strong>", response.text)
+            self.assertIn(f"<span>Strong identity floor</span><strong>{identity_floor}%</strong>", response.text)
             self.assertEqual(provider.calls, [("retirement", 5)])
 
     def test_discovery_result_shows_target_and_rejection_buckets(self) -> None:

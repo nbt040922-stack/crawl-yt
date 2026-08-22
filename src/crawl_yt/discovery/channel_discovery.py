@@ -66,6 +66,9 @@ class DiscoveryReport:
     rejected_candidates: list[DiscoveryCandidate] = field(default_factory=list)
     target_accepted: int = 0
     maximum_candidates: int = 0
+    coverage_threshold: float = 0.0
+    minimum_distinct_concepts: int = 0
+    identity_floor: float = 0.0
     topic_profile_id: int | None = None
     topic_profile_name: str | None = None
     effective_concepts: list[str] = field(default_factory=list)
@@ -220,6 +223,9 @@ class DiscoveryService:
             rejected_candidates=rejected,
             target_accepted=limit,
             maximum_candidates=candidate_cap,
+            coverage_threshold=policy.coverage_threshold,
+            minimum_distinct_concepts=policy.minimum_distinct_concepts,
+            identity_floor=policy.identity_floor,
             topic_profile_id=profile.id if profile else None,
             topic_profile_name=profile.name if profile else None,
             effective_concepts=effective_concepts,
@@ -242,6 +248,9 @@ class DiscoveryService:
                     "unique_channels": report.unique_channels_in_search,
                     "accepted": report.accepted_count,
                     "rejected": report.rejected_count,
+                    "coverage_threshold": report.coverage_threshold,
+                    "minimum_distinct_concepts": report.minimum_distinct_concepts,
+                    "identity_floor": report.identity_floor,
                 },
                 candidate_evidence=(
                     [_candidate_payload(item, True) for item in accepted]
@@ -269,6 +278,7 @@ def _candidate_payload(candidate: DiscoveryCandidate, accepted: bool) -> dict[st
         "sample_size": evidence.sample_size,
         "topic_matches": evidence.topic_matches,
         "topic_coverage": evidence.topic_coverage,
+        "distinct_matched_concepts": evidence.distinct_matched_concepts,
         "identity": evidence.identity,
         "reason": evidence.reason,
         "verification_status": "failed" if evidence.reason.startswith("verification_failed:") else "completed",

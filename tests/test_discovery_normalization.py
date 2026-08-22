@@ -67,12 +67,18 @@ class DiscoveryNormalizationTests(unittest.TestCase):
                 return DiscoveryBatch(1, [Channel("UC1", "One")], "search")
 
             def verify(self, channel, sample_size=20):
-                return ChannelVerification(channel, ["retirement planning"] * sample_size)
+                titles = [
+                    "retirement planning" if index % 2 == 0 else "planning for living alone"
+                    for index in range(sample_size)
+                ]
+                return ChannelVerification(channel, titles)
 
         with tempfile.TemporaryDirectory() as directory:
             repository = ChannelRepository(Path(directory) / "db.sqlite")
             provider = Provider()
-            DiscoveryService(provider, repository).discover("  Retirement   Planning ", 1)
+            DiscoveryService(provider, repository).discover(
+                "  Retirement   Planning ", 1, related_terms=["living alone"]
+            )
             self.assertEqual(provider.query, "Retirement Planning")
             self.assertEqual(repository.list_discovery_keyword_summaries()[0]["keyword"], "retirement planning")
 
