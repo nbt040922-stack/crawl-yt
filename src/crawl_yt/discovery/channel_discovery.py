@@ -221,7 +221,13 @@ class DiscoveryService:
         probe_method = getattr(self.provider, "probe_cadence", None)
         if callable(probe_method):
             try:
-                probe = probe_method(channel)
+                try:
+                    probe = probe_method(
+                        channel,
+                        known_videos=(verification.recent_videos if verification else ()),
+                    )
+                except TypeError:
+                    probe = probe_method(channel)
             except Exception as error:
                 return evaluate_cadence(None, failure=f"cadence_probe_failed: {error}")
             if isinstance(probe, CadenceProbe):
@@ -543,6 +549,12 @@ def _candidate_payload(candidate: DiscoveryCandidate, accepted: bool) -> dict[st
                 "reason": candidate.cadence.reason,
                 "videos_per_week_30d": candidate.cadence.videos_per_week_30d,
                 "videos_per_week_90d": candidate.cadence.videos_per_week_90d,
+                "entries_enumerated": candidate.cadence.entries_enumerated,
+                "dates_available": candidate.cadence.dates_available,
+                "dates_enriched": candidate.cadence.dates_enriched,
+                "enrichment_failures": candidate.cadence.enrichment_failures,
+                "probe_exhausted": candidate.cadence.probe_exhausted,
+                "confidence_reason": candidate.cadence.confidence_reason,
             }
             if candidate.cadence is not None else None
         ),

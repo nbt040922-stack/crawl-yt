@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Iterable
 
 MIN_DISCOVERY_VIDEOS_PER_WEEK = 3.0
+CADENCE_PROBE_MAX_ENTRIES = 100
+CADENCE_PROBE_MAX_DATE_ENRICHMENTS = 40
 
 
 class CadenceStatus(StrEnum):
@@ -32,6 +35,12 @@ class CadenceEvidence:
     reason: str
     videos_per_week_30d: float | None = None
     videos_per_week_90d: float | None = None
+    entries_enumerated: int = 0
+    dates_available: int = 0
+    dates_enriched: int = 0
+    enrichment_failures: int = 0
+    probe_exhausted: bool = False
+    confidence_reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +49,12 @@ class CadenceProbe:
 
     published_dates: tuple[datetime, ...]
     exhausted: bool
+    entries_enumerated: int = 0
+    dates_available: int = 0
+    dates_enriched: int = 0
+    enrichment_failures: int = 0
+    confidence_reason: str = ""
+    confidence_reached: bool = False
 
 
 def cadence_band(videos_per_week: float | None) -> str:
@@ -92,8 +107,6 @@ def rates_from_dates(
     reference = now or datetime.now(timezone.utc)
     if reference.tzinfo is None:
         reference = reference.replace(tzinfo=timezone.utc)
-    if reference.tzinfo is None:
-        reference = reference.replace(tzinfo=timezone.utc)
     dates = []
     for value in published_dates:
         current = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
@@ -116,6 +129,8 @@ def evidence_from_probe(
     probe: CadenceProbe, now: datetime | None = None
 ) -> CadenceEvidence:
     reference = now or datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
     normalized = [
         value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
         for value in probe.published_dates
@@ -124,12 +139,33 @@ def evidence_from_probe(
     recent_30 = sum(value >= cutoff_30 for value in normalized)
     # A bounded probe is reliable once it reaches the 30-day boundary, is
     # exhausted, or has at least 30 recent entries (already >= 7/week).
-    covered_window = probe.exhausted or any(value <= cutoff_30 for value in normalized) or recent_30 >= 30
+    complete_dates = (
+        probe.dates_available == 0
+        or probe.dates_available >= probe.entries_enumerated
+    )
+    covered_window = (
+        probe.confidence_reached
+        or (probe.entries_enumerated == 0 and any(value <= cutoff_30 for value in normalized))
+        or (complete_dates and probe.exhausted)
+        or recent_30 >= 30
+    )
+    diagnostics = {
+        "entries_enumerated": probe.entries_enumerated,
+        "dates_available": probe.dates_available or len(normalized),
+        "dates_enriched": probe.dates_enriched,
+        "enrichment_failures": probe.enrichment_failures,
+        "probe_exhausted": probe.exhausted,
+        "confidence_reason": probe.confidence_reason,
+    }
     if not normalized or not covered_window:
-        return evaluate_cadence(None)
+        result = evaluate_cadence(None)
+        if probe.confidence_reason:
+            diagnostics["reason"] = probe.confidence_reason
+        return dataclasses.replace(result, **diagnostics)
     rates = rates_from_dates(normalized, reference)
-    return evaluate_cadence(
+    result = evaluate_cadence(
         rates.videos_per_week_30d,
         videos_per_week_30d=rates.videos_per_week_30d,
         videos_per_week_90d=rates.videos_per_week_90d,
     )
+    return dataclasses.replace(result, **diagnostics)

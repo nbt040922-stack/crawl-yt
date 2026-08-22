@@ -18,7 +18,7 @@ def _integer(value: Any) -> int | None:
         return None
 
 
-def _published_at(entry: dict[str, Any]) -> datetime | None:
+def published_at_from_entry(entry: dict[str, Any]) -> datetime | None:
     timestamp = entry.get("timestamp")
     if timestamp is None:
         timestamp = entry.get("release_timestamp")
@@ -30,6 +30,9 @@ def _published_at(entry: dict[str, Any]) -> datetime | None:
     upload_date = str(entry.get("upload_date") or "")
     if len(upload_date) == 8 and upload_date.isdigit():
         return datetime.strptime(upload_date, "%Y%m%d").replace(tzinfo=timezone.utc)
+    release_date = str(entry.get("release_date") or "")
+    if len(release_date) == 8 and release_date.isdigit():
+        return datetime.strptime(release_date, "%Y%m%d").replace(tzinfo=timezone.utc)
     return None
 
 
@@ -54,7 +57,7 @@ def normalize_video(entry: dict[str, Any], channel_id: str) -> Video | None:
         title=str(entry.get("title") or video_id),
         first_seen_at=now,
         description=entry.get("description"),
-        published_at=_published_at(entry),
+        published_at=published_at_from_entry(entry),
         duration_seconds=_integer(entry.get("duration")),
         view_count=_integer(entry.get("view_count")),
         like_count=_integer(entry.get("like_count")),

@@ -88,9 +88,11 @@ class ChannelCrawlTests(unittest.TestCase):
         timestamp = normalize_video({"id": "timestamp", "timestamp": 0, "release_timestamp": 86400, "upload_date": "20260812"}, "UC123")
         release = normalize_video({"id": "release", "release_timestamp": 86400}, "UC123")
         upload = normalize_video({"id": "upload", "upload_date": "20260812"}, "UC123")
+        release_date = normalize_video({"id": "release-date", "release_date": "20260812"}, "UC123")
         self.assertEqual(timestamp.published_at, datetime(1970, 1, 1, tzinfo=timezone.utc))
         self.assertEqual(release.published_at, datetime(1970, 1, 2, tzinfo=timezone.utc))
         self.assertEqual(upload.published_at, datetime(2026, 8, 12, tzinfo=timezone.utc))
+        self.assertEqual(release_date.published_at, datetime(2026, 8, 12, tzinfo=timezone.utc))
 
     def test_full_crawl_bounded_metadata_dates_enable_cadence_before_rescore(self) -> None:
         base = datetime(2026, 8, 13, tzinfo=timezone.utc)
