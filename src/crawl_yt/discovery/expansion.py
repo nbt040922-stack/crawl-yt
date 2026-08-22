@@ -109,7 +109,9 @@ class DiscoveryExpansionService:
         max_generated_per_query: int = 5,
     ) -> None:
         self.repository = repository
-        self.discovery = DiscoveryService(provider, repository)
+        # Expansion is the legacy explicit Phase 2C flow; retain its bounded
+        # candidate semantics while the primary Discovery command uses the gate.
+        self.discovery = DiscoveryService(provider, repository, enforce_topic_gate=False)
         self.scoring = ChannelScoringService(repository)
         self.planner = ExpansionPlanner(repository, max_queries_per_channel)
         self.score_threshold = score_threshold

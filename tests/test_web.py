@@ -15,7 +15,7 @@ from src.crawl_yt.collectors.video_metadata import VideoMetadata
 from src.crawl_yt.collectors.channel_metadata import ChannelMetadata
 from src.crawl_yt.database.models import Channel, ChannelScore, Transcript, Video, VideoScore
 from src.crawl_yt.database.repository import TranscriptRepository
-from src.crawl_yt.discovery.channel_discovery import DiscoveryBatch
+from src.crawl_yt.discovery.channel_discovery import ChannelVerification, DiscoveryBatch
 from src.crawl_yt.transcripts.provider import TranscriptData
 from src.crawl_yt.web.app import create_app
 
@@ -26,12 +26,26 @@ class DiscoveryFake:
 
     def search(self, keyword, limit):
         self.calls.append((keyword, limit))
+        self.keyword = keyword
         return DiscoveryBatch(2, [Channel("UC1", "One", channel_url="https://youtube.com/channel/UC1"), Channel("UC3", "Two", channel_url="https://youtube.com/channel/UC3")], "fake")
+
+    def verify(self, channel, sample_size=20):
+        return ChannelVerification(channel, [f"{self.keyword} planning"] * sample_size)
 
 
 class EmptyDiscoveryFake:
     def search(self, keyword, limit):
         return DiscoveryBatch(0, [], "fake")
+
+
+class RelevanceDiscoveryFake:
+    def search(self, keyword, limit):
+        self.keyword = keyword
+        return DiscoveryBatch(2, [Channel("UCA", "Accepted"), Channel("UCR", "Rejected")], "fake")
+
+    def verify(self, channel, sample_size=20):
+        count = 20 if channel.channel_id == "UCA" else 1
+        return ChannelVerification(channel, [f"{self.keyword} planning"] * count + ["Unrelated topic"] * (sample_size - count))
 
 
 class VideoFake:
@@ -282,7 +296,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(app_client.get("/discovery").status_code, 200)
         self.assertEqual(provider.calls, [])
         self.assertEqual(app_client.post("/discovery", data={"keyword": "retirement", "limit": "1"}).status_code, 200)
-        self.assertEqual(provider.calls, [("retirement", 1)])
+        self.assertEqual(provider.calls, [("retirement", 5)])
 
     def test_discovery_result_is_structured_and_labels_statuses(self) -> None:
         provider = DiscoveryFake()
@@ -312,6 +326,18 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("Dry run — nothing was written to the database.", response.text)
         self.assertIn("Discovered", response.text)
+
+    def test_discovery_relevance_ui_shows_mode_related_terms_and_rejections(self) -> None:
+        response = TestClient(create_app(repository=self.repository, discovery_provider=RelevanceDiscoveryFake())).post(
+            "/discovery", data={"keyword": "retirement", "limit": "2", "mode": "strict", "related_terms": "planning, PLANNING"}
+        )
+        self.assertEqual(response.status_code, 200)
+        for label in ("Candidates found", "Accepted", "Rejected", "Mode", "Minimum coverage", "Accepted", "Rejected candidates", "Topic coverage", "Matched sample", "Identity", "Evidence"):
+            self.assertIn(label, response.text)
+        self.assertIn("Related terms: planning", response.text)
+        self.assertIn("Accepted", response.text)
+        self.assertIn("1 / 20", response.text)
+        self.assertIn("Rejected</td>", response.text)
 
     def test_discovery_history_shows_keyword_counts_and_links(self) -> None:
         response = self.client.get("/discovery")

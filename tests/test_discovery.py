@@ -8,21 +8,44 @@ from pathlib import Path
 
 from src.crawl_yt.database.models import Channel
 from src.crawl_yt.database.repository import ChannelRepository, VideoRepository
-from src.crawl_yt.discovery.channel_discovery import DiscoveryBatch, DiscoveryService
+from src.crawl_yt.discovery.channel_discovery import ChannelVerification, DiscoveryBatch, DiscoveryService
 from src.crawl_yt.discovery.channel_scoring import ChannelScoringService
 from src.crawl_yt.discovery.ytdlp_provider import normalize_channel
 
 
 class FakeProvider:
     def search(self, keyword: str, limit: int) -> DiscoveryBatch:
+        self.keyword = keyword
         return DiscoveryBatch(
             search_results=2,
             channels=[Channel("UC123", "Example"), Channel("UC123", "Example")],
             source="test",
         )
 
+    def verify(self, channel, sample_size=20):
+        return ChannelVerification(channel, [f"{self.keyword} planning"] * sample_size)
+
 
 class DiscoveryTests(unittest.TestCase):
+    def _provider(self, channels, matches=20, fail_ids=None):
+        class Provider:
+            def __init__(self):
+                self.verify_calls = []
+
+            def search(self, keyword, limit):
+                self.keyword = keyword
+                return DiscoveryBatch(len(channels), channels, "test")
+
+            def verify(self, channel, sample_size=20):
+                self.verify_calls.append(channel.channel_id)
+                if fail_ids and channel.channel_id in fail_ids:
+                    raise RuntimeError("verification unavailable")
+                count = matches[channel.channel_id] if isinstance(matches, dict) else matches
+                titles = [f"{self.keyword} guide"] * count + ["Unrelated gardening"] * (sample_size - count)
+                return ChannelVerification(channel, titles)
+
+        return Provider()
+
     def test_normalizes_stable_channel_id(self) -> None:
         channel = normalize_channel(
             {
@@ -101,6 +124,52 @@ class DiscoveryTests(unittest.TestCase):
             report = DiscoveryService(FakeProvider(), repository, Lifecycle()).discover("retirement")
             self.assertEqual(report.new_channels, 1)
             self.assertEqual(report.scoring_failures, [("UC123", "score failed")])
+
+    def test_isolated_search_hit_is_rejected_and_not_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = ChannelRepository(Path(directory) / "test.db")
+            provider = self._provider([Channel("UC1", "Candidate")], matches=1)
+            report = DiscoveryService(provider, repository).discover("retirement", 1)
+            self.assertEqual(report.accepted_count, 0)
+            self.assertEqual(report.rejected_candidates[0].evidence.reason, "topic appears only in isolated or insufficient recent videos")
+            self.assertIsNone(repository.get_channel("UC1"))
+
+    def test_existing_rejected_channel_gets_no_new_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = ChannelRepository(Path(directory) / "test.db")
+            repository.upsert_channel(Channel("UC1", "Existing"))
+            provider = self._provider([Channel("UC1", "Existing")], matches=2)
+            report = DiscoveryService(provider, repository).discover("retirement", 1)
+            self.assertEqual(report.rejected_count, 1)
+            self.assertEqual(repository.count_discovery_relationships(), 0)
+
+    def test_accepted_limit_continues_past_rejected_candidates(self) -> None:
+        channels = [Channel(f"UC{i}", f"Candidate {i}") for i in range(1, 5)]
+        with tempfile.TemporaryDirectory() as directory:
+            repository = ChannelRepository(Path(directory) / "test.db")
+            provider = self._provider(channels, matches={"UC1": 1, "UC2": 1, "UC3": 20, "UC4": 20})
+            report = DiscoveryService(provider, repository).discover("retirement", 2)
+            self.assertEqual(report.accepted_count, 2)
+            self.assertEqual(provider.verify_calls, ["UC1", "UC2", "UC3", "UC4"])
+
+    def test_duplicate_candidates_are_verified_once(self) -> None:
+        channel = Channel("UC1", "Candidate")
+        with tempfile.TemporaryDirectory() as directory:
+            repository = ChannelRepository(Path(directory) / "test.db")
+            provider = self._provider([channel, channel, channel], matches=20)
+            report = DiscoveryService(provider, repository).discover("retirement", 1)
+            self.assertEqual(report.unique_channels_in_search, 1)
+            self.assertEqual(provider.verify_calls, ["UC1"])
+
+    def test_verification_failure_is_rejected_and_other_candidates_continue(self) -> None:
+        channels = [Channel("UC1", "Broken"), Channel("UC2", "Valid")]
+        with tempfile.TemporaryDirectory() as directory:
+            repository = ChannelRepository(Path(directory) / "test.db")
+            provider = self._provider(channels, matches=20, fail_ids={"UC1"})
+            report = DiscoveryService(provider, repository).discover("retirement", 1)
+            self.assertEqual(report.accepted_count, 1)
+            self.assertIn("verification_failed", report.rejected_candidates[0].evidence.reason)
+            self.assertIsNotNone(repository.get_channel("UC2"))
 
 
 if __name__ == "__main__":

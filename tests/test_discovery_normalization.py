@@ -9,7 +9,7 @@ from pathlib import Path
 from src.crawl_yt.database.models import Channel
 from src.crawl_yt.database.repository import ChannelRepository
 from src.crawl_yt.discovery.normalization import normalize_discovery_keyword
-from src.crawl_yt.discovery.channel_discovery import DiscoveryBatch, DiscoveryService
+from src.crawl_yt.discovery.channel_discovery import ChannelVerification, DiscoveryBatch, DiscoveryService
 
 
 class DiscoveryNormalizationTests(unittest.TestCase):
@@ -65,6 +65,9 @@ class DiscoveryNormalizationTests(unittest.TestCase):
             def search(self, keyword, limit):
                 self.query = keyword
                 return DiscoveryBatch(1, [Channel("UC1", "One")], "search")
+
+            def verify(self, channel, sample_size=20):
+                return ChannelVerification(channel, ["retirement planning"] * sample_size)
 
         with tempfile.TemporaryDirectory() as directory:
             repository = ChannelRepository(Path(directory) / "db.sqlite")

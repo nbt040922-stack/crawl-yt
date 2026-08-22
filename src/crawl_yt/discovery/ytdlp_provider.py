@@ -8,7 +8,7 @@ from typing import Any
 from yt_dlp import YoutubeDL
 
 from ..database.models import Channel
-from .channel_discovery import DiscoveryBatch
+from .channel_discovery import ChannelVerification, DiscoveryBatch
 
 
 def normalize_channel(entry: dict[str, Any]) -> Channel | None:
@@ -59,3 +59,27 @@ class YtDlpDiscoveryProvider:
             channels=channels,
             source="yt-dlp:ytsearch",
         )
+
+    def verify(self, channel: Channel, sample_size: int = 20) -> ChannelVerification:
+        url = channel.channel_url or f"https://www.youtube.com/channel/{channel.channel_id}"
+        options = {
+            "extract_flat": True,
+            "quiet": True,
+            "no_warnings": False,
+            "skip_download": True,
+            "playlistend": min(sample_size, 20),
+        }
+        with YoutubeDL(options) as ydl:
+            info = ydl.extract_info(url, download=False)
+        entries = [entry for entry in (info or {}).get("entries", []) if entry]
+        verified = Channel(
+            channel_id=channel.channel_id,
+            title=str((info or {}).get("title") or channel.title),
+            description=(info or {}).get("description") or channel.description,
+            channel_url=channel.channel_url or url,
+            subscriber_count=channel.subscriber_count,
+            video_count=channel.video_count,
+            view_count=channel.view_count,
+            last_checked_at=channel.last_checked_at,
+        )
+        return ChannelVerification(verified, [str(entry.get("title") or "") for entry in entries])

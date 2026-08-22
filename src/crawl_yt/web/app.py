@@ -97,11 +97,18 @@ def create_app(
         return render(request, "form.html", title="Discovery", form="discovery", history=database.list_discovery_keyword_summaries())
 
     @app.post("/discovery", response_class=HTMLResponse)
-    def discovery_action(request: Request, keyword: str = Form(...), limit: int = Form(...), dry_run: bool = Form(False)) -> HTMLResponse:
+    def discovery_action(
+        request: Request,
+        keyword: str = Form(...),
+        limit: int = Form(...),
+        mode: str = Form("balanced"),
+        related_terms: str = Form(""),
+        dry_run: bool = Form(False),
+    ) -> HTMLResponse:
         if not keyword.strip() or not 1 <= limit <= 1000:
             raise HTTPException(400, "Keyword and limit 1-1000 are required")
         provider = discovery_provider or YtDlpDiscoveryProvider()
-        report = DiscoveryService(provider, database).discover(keyword.strip(), limit, dry_run=dry_run)
+        report = DiscoveryService(provider, database).discover(keyword.strip(), limit, dry_run=dry_run, mode=mode, related_terms=related_terms)
         return render(
             request,
             "discovery_result.html",
