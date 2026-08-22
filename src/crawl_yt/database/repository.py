@@ -530,14 +530,17 @@ class ChannelRepository:
             raise ValueError("topic profile name is required")
         if not concepts:
             raise ValueError("at least one meaningful concept is required")
-        normalized_search_concepts = normalize_topic_terms(search_concepts or [])
+        normalized_search_concepts = (
+            None if search_concepts is None else normalize_topic_terms(search_concepts)
+        )
         with self._connect() as connection:
             cursor = connection.execute(
                 """UPDATE topic_profiles SET name = ?, description = ?,
-                   concept_phrases_json = ?, search_concepts_json = ?, updated_at = ?
+                   concept_phrases_json = ?,
+                   search_concepts_json = COALESCE(?, search_concepts_json), updated_at = ?
                    WHERE id = ?""",
                 (normalized_name, description.strip(), json.dumps(concepts),
-                 json.dumps(normalized_search_concepts),
+                 None if normalized_search_concepts is None else json.dumps(normalized_search_concepts),
                  self._timestamp(datetime.now(timezone.utc)), profile_id),
             )
         if cursor.rowcount != 1:

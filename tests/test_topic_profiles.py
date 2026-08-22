@@ -49,6 +49,21 @@ class TopicProfileRepositoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "meaningful concept"):
             self.repository.create_topic_profile("Punctuation", "", [".", "---"])
 
+    def test_profile_update_preserves_omitted_search_concepts(self) -> None:
+        profile = self.repository.create_topic_profile(
+            "Solo Aging", "", ["living alone"], ["aging in place"],
+        )
+
+        preserved = self.repository.update_topic_profile(
+            profile.id, "Solo Aging", "Updated", ["independent living"],
+        )
+        self.assertEqual(preserved.search_concepts, ["aging in place"])
+
+        cleared = self.repository.update_topic_profile(
+            profile.id, "Solo Aging", "Updated", ["independent living"], [],
+        )
+        self.assertEqual(cleared.search_concepts, [])
+
     def test_discovery_snapshots_profile_concepts_and_blocks_delete_after_use(self) -> None:
         class Provider:
             def search(self, keyword, limit):
