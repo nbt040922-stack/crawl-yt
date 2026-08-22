@@ -12,6 +12,8 @@ from ..database.repository import VideoRepository
 from ..discovery.channel_scoring import CrawlPriorityPolicy
 from ..scoring_lifecycle import ChannelScoringLifecycle
 
+MAX_CADENCE_METADATA_FETCHES = 150
+
 
 class ChannelVideoProvider(Protocol):
     def iterate_videos(
@@ -34,6 +36,10 @@ class CrawlReport:
     consecutive_known_at_stop: int = 0
     elapsed_seconds: float = 0.0
     scoring_error: str | None = None
+    cadence_metadata_attempted: int = 0
+    cadence_metadata_succeeded: int = 0
+    cadence_metadata_failed: int = 0
+    cadence_metadata_error: str | None = None
 
 
 @dataclass(slots=True)
@@ -60,12 +66,16 @@ class ChannelCrawlService:
         crawl_interval: timedelta | None = None,
         priority_policy: CrawlPriorityPolicy | None = None,
         scoring_lifecycle: ChannelScoringLifecycle | None = None,
+        cadence_metadata_provider=None,
+        max_cadence_metadata_fetches: int = MAX_CADENCE_METADATA_FETCHES,
     ) -> None:
         self.provider = provider
         self.repository = repository
         self.crawl_interval = crawl_interval
         self.priority_policy = priority_policy or CrawlPriorityPolicy()
         self.scoring_lifecycle = scoring_lifecycle or ChannelScoringLifecycle(repository)
+        self.cadence_metadata_provider = cadence_metadata_provider
+        self.max_cadence_metadata_fetches = max_cadence_metadata_fetches
 
     def crawl(
         self,
@@ -90,6 +100,7 @@ class ChannelCrawlService:
         crawl_now = now or datetime.now(timezone.utc)
         self.repository.mark_crawl_started(channel_id, now=crawl_now)
         seen_ids: set[str] = set()
+        seen_order: list[str] = []
         consecutive_known = 0
         last_seen: Video | None = None
         try:
@@ -100,6 +111,7 @@ class ChannelCrawlService:
                     report.skipped_entries += 1
                     continue
                 seen_ids.add(video.video_id)
+                seen_order.append(video.video_id)
                 report.unique_videos += 1
                 if last_seen is None:
                     last_seen = video
@@ -123,6 +135,10 @@ class ChannelCrawlService:
                 channel_id, str(error), now=crawl_now, crawl_interval=self.crawl_interval
             )
             raise
+        if full and self.cadence_metadata_provider is not None:
+            self._collect_cadence_metadata(
+                channel_id, seen_order, crawl_now, report
+            )
         previous_score = self.repository.get_channel_score(channel_id)
         tier = previous_score.tier if previous_score else None
         try:
@@ -144,6 +160,41 @@ class ChannelCrawlService:
         )
         report.elapsed_seconds = perf_counter() - started
         return report
+
+    def _collect_cadence_metadata(
+        self, channel_id: str, video_ids: list[str], now: datetime, report: CrawlReport
+    ) -> None:
+        """Fetch bounded recent metadata until a dated 90-day boundary is known."""
+        from .video_metadata import VideoMetadataService
+
+        if self.max_cadence_metadata_fetches < 1:
+            return
+        cutoff = now - timedelta(days=90)
+        service = VideoMetadataService(
+            self.cadence_metadata_provider, self.repository, scoring_lifecycle=self.scoring_lifecycle
+        )
+        for video_id in video_ids:
+            stored = self.repository.get_video(video_id)
+            if stored is None:
+                continue
+            dated = stored.published_at
+            if dated is not None and dated <= cutoff:
+                break
+            if dated is None:
+                if report.cadence_metadata_attempted >= self.max_cadence_metadata_fetches:
+                    break
+                report.cadence_metadata_attempted += 1
+                result = service.enrich(video_id, rescore=False)
+                if result.success:
+                    report.cadence_metadata_succeeded += 1
+                else:
+                    report.cadence_metadata_failed += 1
+                    report.cadence_metadata_error = result.error
+                    continue
+                stored = self.repository.get_video(video_id)
+                dated = stored.published_at if stored is not None else None
+            if dated is not None and dated <= cutoff:
+                break
 
     def crawl_all(
         self,

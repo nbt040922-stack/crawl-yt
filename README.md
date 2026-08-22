@@ -254,3 +254,8 @@ và tạo batch. Batch đóng băng danh sách channel tại thời điểm tạ
 để crawl tuần tự từng chunk (1-20). Mỗi channel luôn chạy full crawl, không phụ
 thuộc trạng thái due hay lịch sử crawl. Kết quả thành công tự động cập nhật score
 và lịch crawl; lỗi có thể retry thủ công từ trang chi tiết batch.
+
+Full crawl dùng flat playlist để lưu video ID trước. Vì flat entries có thể thiếu
+ngày đăng, tối đa 150 video gần nhất được lấy metadata tuần tự để xác lập cadence;
+quá trình dừng khi gặp video có ngày đăng cũ hơn 90 ngày. Nếu không đủ ngày tin cậy,
+cadence vẫn được giữ ở trạng thái chưa đủ dữ liệu thay vì suy đoán từ tổng số video.

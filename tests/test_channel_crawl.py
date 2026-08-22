@@ -12,6 +12,7 @@ from src.crawl_yt.collectors.channel_collector import (
     UnknownChannelError,
 )
 from src.crawl_yt.collectors.ytdlp_channel_video import normalize_video
+from src.crawl_yt.collectors.video_metadata import VideoMetadata
 from src.crawl_yt.database.models import Channel, Video
 from src.crawl_yt.database.repository import VideoRepository
 
@@ -29,6 +30,16 @@ class FakeVideoProvider:
             Video(f"{channel_id}-2", channel_id, "Two", now),
         ]
         yield from videos[:limit]
+
+
+class DatedMetadataProvider:
+    def __init__(self, dates):
+        self.dates = dates
+        self.calls = []
+
+    def fetch(self, video_id, webpage_url=None):
+        self.calls.append(video_id)
+        return VideoMetadata(video_id, "fake", published_at=self.dates[video_id])
 
 
 class ChannelCrawlTests(unittest.TestCase):
@@ -60,6 +71,47 @@ class ChannelCrawlTests(unittest.TestCase):
         self.assertEqual(video.view_count, 100)
         self.assertEqual(video.webpage_url, "https://www.youtube.com/watch?v=abc123")
         self.assertEqual(video.metadata_source, "yt-dlp:channel-flat")
+
+    def test_provider_mapping_prefers_timestamp_then_release_timestamp_then_upload_date(self) -> None:
+        timestamp = normalize_video({"id": "timestamp", "timestamp": 0, "release_timestamp": 86400, "upload_date": "20260812"}, "UC123")
+        release = normalize_video({"id": "release", "release_timestamp": 86400}, "UC123")
+        upload = normalize_video({"id": "upload", "upload_date": "20260812"}, "UC123")
+        self.assertEqual(timestamp.published_at, datetime(1970, 1, 1, tzinfo=timezone.utc))
+        self.assertEqual(release.published_at, datetime(1970, 1, 2, tzinfo=timezone.utc))
+        self.assertEqual(upload.published_at, datetime(2026, 8, 12, tzinfo=timezone.utc))
+
+    def test_full_crawl_bounded_metadata_dates_enable_cadence_before_rescore(self) -> None:
+        base = datetime(2026, 8, 13, tzinfo=timezone.utc)
+        videos = [Video(f"dated-{i}", "UC123", str(i), base) for i in range(20)]
+        dates = {video.video_id: base - timedelta(days=i * 7) for i, video in enumerate(videos)}
+        metadata = DatedMetadataProvider(dates)
+        class Provider:
+            def iterate_videos(self, channel_id, limit=None):
+                yield from videos
+        report = ChannelCrawlService(Provider(), self.repository, cadence_metadata_provider=metadata).crawl("UC123", full=True, now=base)
+        score = self.repository.get_channel_score("UC123")
+        self.assertGreater(report.cadence_metadata_succeeded, 0)
+        self.assertLessEqual(report.cadence_metadata_attempted, 150)
+        self.assertIsNotNone(score.videos_per_week_30d)
+        self.assertIsNotNone(score.videos_per_week_90d)
+        self.assertNotEqual(score.reasons["score_maturity"], "preliminary")
+
+    def test_full_crawl_missing_dates_stays_unknown_and_respects_cap(self) -> None:
+        videos = [Video(f"missing-{i}", "UC123", str(i), datetime(2026, 8, 13, tzinfo=timezone.utc)) for i in range(500)]
+        class Provider:
+            def iterate_videos(self, channel_id, limit=None):
+                yield from videos
+        class MissingMetadata:
+            def __init__(self): self.calls = []
+            def fetch(self, video_id, webpage_url=None):
+                self.calls.append(video_id)
+                return VideoMetadata(video_id, "fake")
+        metadata = MissingMetadata()
+        report = ChannelCrawlService(Provider(), self.repository, cadence_metadata_provider=metadata, max_cadence_metadata_fetches=150).crawl("UC123", full=True)
+        score = self.repository.get_channel_score("UC123")
+        self.assertEqual(len(metadata.calls), 150)
+        self.assertIsNone(score.videos_per_week_90d)
+        self.assertEqual(report.cadence_metadata_failed, 0)
 
     def test_second_crawl_reports_existing_videos(self) -> None:
         service = ChannelCrawlService(FakeVideoProvider(), self.repository)

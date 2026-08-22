@@ -19,6 +19,8 @@ def _integer(value: Any) -> int | None:
 
 def _published_at(entry: dict[str, Any]) -> datetime | None:
     timestamp = entry.get("timestamp")
+    if timestamp is None:
+        timestamp = entry.get("release_timestamp")
     if timestamp is not None:
         try:
             return datetime.fromtimestamp(float(timestamp), timezone.utc)
