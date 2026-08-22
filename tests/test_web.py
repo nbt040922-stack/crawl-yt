@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
 from src.crawl_yt.collectors.video_metadata import VideoMetadata
+from src.crawl_yt.collectors.channel_metadata import ChannelMetadata
 from src.crawl_yt.database.models import Channel, ChannelScore, Transcript, Video, VideoScore
 from src.crawl_yt.database.repository import TranscriptRepository
 from src.crawl_yt.discovery.channel_discovery import DiscoveryBatch
@@ -423,6 +424,7 @@ class WebTests(unittest.TestCase):
         self.repository.upsert_channel(Channel("UC59", "Below", channel_url="https://example.com/below"))
         self.repository.upsert_channel(Channel("UC60", "Included", channel_url="https://example.com/included"))
         self.repository.upsert_channel(Channel("UC80", "High"))
+        self.repository.update_channel_metadata(ChannelMetadata("UC60", subscriber_count=1234, view_count=5678, video_count=99))
         self.repository.record_discovery("UC60", "retirement", "seed", now)
         for channel_id, score in (("UC59", 59.9), ("UC60", 60), ("UC80", 80)):
             self.repository.upsert_channel_score(ChannelScore(channel_id, score, 70, 80, 75, 60, "high", {"videos_per_week_30d": 5.5, "videos_per_week_90d": 4.2, "cadence_fit": "very good", "median_enriched_views": 40000, "view_subscriber_ratio": 0.8, "score_maturity": "mature"}, now, "v2", 85, 5.5, 4.2))
@@ -432,7 +434,7 @@ class WebTests(unittest.TestCase):
         self.assertIn("attachment; filename=\"crawl-yt-channels-score-60.xlsx\"", response.headers["content-disposition"])
         workbook = load_workbook(BytesIO(response.content))
         sheet = workbook["Channels"]
-        self.assertEqual([cell.value for cell in sheet[1]], ["Channel", "Channel URL", "Channel ID", "Overall Score", "Tier", "Videos/Week 30d", "Videos/Week 90d", "Cadence Fit", "Subscribers", "Median Video Views", "Views / Subscribers", "Discovery Keywords", "Score Maturity", "Scoring Version", "Last Crawl", "Next Crawl"])
+        self.assertEqual([cell.value for cell in sheet[1]], ["Channel", "Channel URL", "Channel ID", "Overall Score", "Tier", "Videos/Week 30d", "Videos/Week 90d", "Cadence Fit", "Subscribers", "Channel Views", "Reported Video Count", "Median Video Views", "Views / Subscribers", "Discovery Keywords", "Score Maturity", "Scoring Version", "Last Crawl", "Next Crawl"])
         self.assertEqual(sheet.freeze_panes, "A2")
         self.assertIsNotNone(sheet.auto_filter.ref)
         values = list(sheet.iter_rows(min_row=2, values_only=False))
@@ -440,8 +442,11 @@ class WebTests(unittest.TestCase):
         self.assertEqual(names, ["High", "Included"])
         self.assertEqual(values[1][1].value, "https://example.com/included")
         self.assertEqual(values[1][1].hyperlink.target, "https://example.com/included")
-        self.assertEqual(values[1][11].value, "retirement")
-        self.assertEqual(values[0][11].value, None)
+        self.assertEqual(values[1][8].value, 1234)
+        self.assertEqual(values[1][9].value, 5678)
+        self.assertEqual(values[1][10].value, 99)
+        self.assertEqual(values[1][13].value, "retirement")
+        self.assertEqual(values[0][13].value, None)
 
     def test_channel_export_respects_filters_and_ignores_pagination(self) -> None:
         now = datetime.now(timezone.utc)
@@ -502,6 +507,13 @@ class WebTests(unittest.TestCase):
         self.repository.upsert_channel(Channel("UC0", "Zero", subscriber_count=0))
         response = self.client.get("/channels/UC0")
         self.assertIn("Subscribers: 0", response.text)
+
+    def test_channel_metadata_fields_and_large_numbers_are_human_readable(self) -> None:
+        self.repository.update_channel_metadata(ChannelMetadata("UC1", subscriber_count=1250000, view_count=9876543, video_count=42))
+        response = self.client.get("/channels/UC1")
+        self.assertIn("1,250,000", response.text)
+        self.assertIn("9,876,543", response.text)
+        self.assertIn("Reported videos", response.text)
 
     def test_channel_without_videos_has_empty_state(self) -> None:
         self.repository.upsert_channel(Channel("UC0", "Empty"))

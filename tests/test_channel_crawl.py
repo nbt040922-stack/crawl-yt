@@ -13,6 +13,7 @@ from src.crawl_yt.collectors.channel_collector import (
 )
 from src.crawl_yt.collectors.ytdlp_channel_video import normalize_video
 from src.crawl_yt.collectors.video_metadata import VideoMetadata
+from src.crawl_yt.collectors.channel_metadata import ChannelMetadata
 from src.crawl_yt.database.models import Channel, Video
 from src.crawl_yt.database.repository import VideoRepository
 
@@ -40,6 +41,17 @@ class DatedMetadataProvider:
     def fetch(self, video_id, webpage_url=None):
         self.calls.append(video_id)
         return VideoMetadata(video_id, "fake", published_at=self.dates[video_id])
+
+
+class ChannelMetadataFake:
+    def __init__(self, events):
+        self.calls = []
+        self.events = events
+
+    def fetch(self, channel_id):
+        self.calls.append(channel_id)
+        self.events.append("channel_metadata")
+        return ChannelMetadata(channel_id, title="Hydrated", subscriber_count=12345, view_count=99999, video_count=20)
 
 
 class ChannelCrawlTests(unittest.TestCase):
@@ -112,6 +124,36 @@ class ChannelCrawlTests(unittest.TestCase):
         self.assertEqual(len(metadata.calls), 150)
         self.assertIsNone(score.videos_per_week_90d)
         self.assertEqual(report.cadence_metadata_failed, 0)
+
+    def test_full_crawl_hydrates_channel_once_after_cadence_and_incremental_skips(self) -> None:
+        events = []
+        metadata = ChannelMetadataFake(events)
+        class Provider:
+            def iterate_videos(self, channel_id, limit=None):
+                events.append("videos")
+                yield Video("ordered", channel_id, "Ordered", datetime.now(timezone.utc))
+        class Lifecycle:
+            def score_channel(self, channel_id):
+                events.append("score")
+                return None
+        service = ChannelCrawlService(Provider(), self.repository, scoring_lifecycle=Lifecycle(), channel_metadata_provider=metadata)
+        service.crawl("UC123", full=True)
+        self.assertEqual(events, ["videos", "channel_metadata", "score"])
+        self.assertEqual(metadata.calls, ["UC123"])
+        service.crawl("UC123", full=False)
+        self.assertEqual(metadata.calls, ["UC123"])
+
+    def test_channel_metadata_failure_preserves_crawl_and_score(self) -> None:
+        class Provider:
+            def iterate_videos(self, channel_id, limit=None):
+                yield Video("kept", channel_id, "Kept", datetime.now(timezone.utc))
+        class BrokenMetadata:
+            def fetch(self, channel_id):
+                raise RuntimeError("channel metadata unavailable")
+        report = ChannelCrawlService(Provider(), self.repository, channel_metadata_provider=BrokenMetadata()).crawl("UC123", full=True)
+        self.assertEqual(report.channel_metadata_error, "channel metadata unavailable")
+        self.assertEqual(self.repository.count_videos(), 1)
+        self.assertIsNotNone(self.repository.get_channel_score("UC123"))
 
     def test_second_crawl_reports_existing_videos(self) -> None:
         service = ChannelCrawlService(FakeVideoProvider(), self.repository)

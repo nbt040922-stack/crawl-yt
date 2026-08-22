@@ -40,6 +40,7 @@ class CrawlReport:
     cadence_metadata_succeeded: int = 0
     cadence_metadata_failed: int = 0
     cadence_metadata_error: str | None = None
+    channel_metadata_error: str | None = None
 
 
 @dataclass(slots=True)
@@ -68,6 +69,7 @@ class ChannelCrawlService:
         scoring_lifecycle: ChannelScoringLifecycle | None = None,
         cadence_metadata_provider=None,
         max_cadence_metadata_fetches: int = MAX_CADENCE_METADATA_FETCHES,
+        channel_metadata_provider=None,
     ) -> None:
         self.provider = provider
         self.repository = repository
@@ -76,6 +78,7 @@ class ChannelCrawlService:
         self.scoring_lifecycle = scoring_lifecycle or ChannelScoringLifecycle(repository)
         self.cadence_metadata_provider = cadence_metadata_provider
         self.max_cadence_metadata_fetches = max_cadence_metadata_fetches
+        self.channel_metadata_provider = channel_metadata_provider
 
     def crawl(
         self,
@@ -139,6 +142,12 @@ class ChannelCrawlService:
             self._collect_cadence_metadata(
                 channel_id, seen_order, crawl_now, report
             )
+        if full and self.channel_metadata_provider is not None:
+            try:
+                channel_metadata = self.channel_metadata_provider.fetch(channel_id)
+                self.repository.update_channel_metadata(channel_metadata)
+            except Exception as error:
+                report.channel_metadata_error = str(error)
         previous_score = self.repository.get_channel_score(channel_id)
         tier = previous_score.tier if previous_score else None
         try:

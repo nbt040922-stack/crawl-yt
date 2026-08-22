@@ -19,6 +19,7 @@ from ..collectors.channel_collector import ChannelCrawlService
 from ..collectors.video_metadata import VideoMetadataService
 from ..collectors.ytdlp_channel_video import YtDlpChannelVideoProvider
 from ..collectors.ytdlp_video_metadata import YtDlpVideoMetadataProvider
+from ..collectors.ytdlp_channel_metadata import YtDlpChannelMetadataProvider
 from ..database.models import OperationalBudget
 from ..database.repository import TranscriptRepository, VideoRepository
 from ..discovery.channel_discovery import DiscoveryService
@@ -36,6 +37,7 @@ from openpyxl.styles import Font
 ROOT = Path(__file__).parent
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
 templates.env.globals["quote"] = quote
+templates.env.globals["format_number"] = lambda value: f"{value:,}" if value is not None else "—"
 
 
 def create_app(
@@ -269,7 +271,11 @@ def create_app(
             raise HTTPException(404, "Channel not found")
         if not confirm:
             raise HTTPException(400, "Full crawl requires explicit confirmation")
-        service = ChannelCrawlService(video_provider or YtDlpChannelVideoProvider(), database)
+        service = ChannelCrawlService(
+            video_provider or YtDlpChannelVideoProvider(), database,
+            cadence_metadata_provider=YtDlpVideoMetadataProvider() if video_provider is None else None,
+            channel_metadata_provider=YtDlpChannelMetadataProvider() if video_provider is None else None,
+        )
         service.crawl(channel_id, full=True)
         return RedirectResponse(f"/channels/{channel_id}", status_code=303)
 
@@ -458,6 +464,9 @@ def _format_interval(value) -> str:
     return f"{days} day" if days == 1 else f"{days} days"
 
 
+templates.env.globals["format_datetime"] = _format_datetime
+
+
 def _parse_optional_float(
     value: str | None,
     field_name: str,
@@ -480,7 +489,7 @@ def _parse_optional_float(
 
 
 def _channels_workbook(rows: list[dict[str, object]]) -> Workbook:
-    headers = ["Channel", "Channel URL", "Channel ID", "Overall Score", "Tier", "Videos/Week 30d", "Videos/Week 90d", "Cadence Fit", "Subscribers", "Median Video Views", "Views / Subscribers", "Discovery Keywords", "Score Maturity", "Scoring Version", "Last Crawl", "Next Crawl"]
+    headers = ["Channel", "Channel URL", "Channel ID", "Overall Score", "Tier", "Videos/Week 30d", "Videos/Week 90d", "Cadence Fit", "Subscribers", "Channel Views", "Reported Video Count", "Median Video Views", "Views / Subscribers", "Discovery Keywords", "Score Maturity", "Scoring Version", "Last Crawl", "Next Crawl"]
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Channels"
@@ -493,14 +502,14 @@ def _channels_workbook(rows: list[dict[str, object]]) -> Workbook:
         except (TypeError, ValueError):
             reasons = {}
         url = row.get("channel_url") or f"https://www.youtube.com/channel/{row.get('channel_id')}"
-        values = [row.get("title"), url, row.get("channel_id"), row.get("score"), row.get("tier"), row.get("videos_per_week_30d"), row.get("videos_per_week_90d"), row.get("cadence_fit"), row.get("subscriber_count"), reasons.get("median_enriched_views"), reasons.get("view_subscriber_ratio"), row.get("discovery_keywords"), reasons.get("score_maturity"), row.get("scoring_version"), row.get("last_success_at"), row.get("next_crawl_at")]
+        values = [row.get("title"), url, row.get("channel_id"), row.get("score"), row.get("tier"), row.get("videos_per_week_30d"), row.get("videos_per_week_90d"), row.get("cadence_fit"), row.get("subscriber_count"), row.get("view_count"), row.get("video_count"), reasons.get("median_enriched_views"), reasons.get("view_subscriber_ratio"), row.get("discovery_keywords"), reasons.get("score_maturity"), row.get("scoring_version"), row.get("last_success_at"), row.get("next_crawl_at")]
         sheet.append(values)
         link = sheet.cell(sheet.max_row, 2)
         link.hyperlink = str(url)
         link.style = "Hyperlink"
     sheet.freeze_panes = "A2"
-    sheet.auto_filter.ref = f"A1:P{sheet.max_row}"
-    widths = [28, 48, 18, 15, 12, 17, 17, 16, 15, 20, 20, 28, 18, 18, 22, 22]
+    sheet.auto_filter.ref = f"A1:R{sheet.max_row}"
+    widths = [28, 48, 18, 15, 12, 17, 17, 16, 15, 17, 21, 20, 20, 28, 18, 18, 22, 22]
     for index, width in enumerate(widths, 1):
         sheet.column_dimensions[chr(64 + index)].width = width
     return workbook

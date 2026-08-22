@@ -72,7 +72,8 @@ class ChannelRepository:
                     subscriber_count INTEGER,
                     video_count INTEGER,
                     view_count INTEGER,
-                    last_checked_at TEXT
+                    last_checked_at TEXT,
+                    metadata_checked_at TEXT
                 );
                 CREATE TABLE IF NOT EXISTS channel_discoveries (
                     channel_id TEXT NOT NULL,
@@ -367,6 +368,12 @@ class ChannelRepository:
             ):
                 if name not in video_columns:
                     connection.execute(f"ALTER TABLE videos ADD COLUMN {name} TEXT")
+            channel_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(channels)").fetchall()
+            }
+            if "metadata_checked_at" not in channel_columns:
+                connection.execute("ALTER TABLE channels ADD COLUMN metadata_checked_at TEXT")
 
     def upsert_channel(self, channel: Channel) -> bool:
         """Upsert canonical metadata, returning True only for a new channel."""
@@ -376,8 +383,8 @@ class ChannelRepository:
                 """
                 INSERT OR IGNORE INTO channels (
                     channel_id, title, description, channel_url,
-                    subscriber_count, video_count, view_count, last_checked_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    subscriber_count, video_count, view_count, last_checked_at, metadata_checked_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 values,
             )
@@ -391,7 +398,7 @@ class ChannelRepository:
                         subscriber_count = COALESCE(?, subscriber_count),
                         video_count = COALESCE(?, video_count),
                         view_count = COALESCE(?, view_count),
-                        last_checked_at = ?
+                        last_checked_at = ?, metadata_checked_at = COALESCE(?, metadata_checked_at)
                     WHERE channel_id = ?
                     """,
                     (
@@ -402,10 +409,31 @@ class ChannelRepository:
                         channel.video_count,
                         channel.view_count,
                         self._timestamp(channel.last_checked_at),
+                        self._timestamp(channel.metadata_checked_at),
                         channel.channel_id,
                     ),
                 )
         return inserted
+
+    def update_channel_metadata(self, metadata) -> bool:
+        """Persist non-empty channel metadata without erasing known values."""
+        checked_at = metadata.checked_at or datetime.now(timezone.utc)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """UPDATE channels SET
+                   title = COALESCE(NULLIF(?, ''), title),
+                   description = COALESCE(NULLIF(?, ''), description),
+                   channel_url = COALESCE(NULLIF(?, ''), channel_url),
+                   subscriber_count = COALESCE(?, subscriber_count),
+                   view_count = COALESCE(?, view_count),
+                   video_count = COALESCE(?, video_count),
+                   metadata_checked_at = ?
+                   WHERE channel_id = ?""",
+                (metadata.title, metadata.description, metadata.channel_url,
+                 metadata.subscriber_count, metadata.view_count, metadata.video_count,
+                 self._timestamp(checked_at), metadata.channel_id),
+            )
+        return cursor.rowcount == 1
 
     def record_discovery(
         self,
@@ -878,6 +906,7 @@ class ChannelRepository:
             channel.video_count,
             channel.view_count,
             cls._timestamp(channel.last_checked_at),
+            cls._timestamp(channel.metadata_checked_at),
         )
 
     @staticmethod
@@ -901,6 +930,11 @@ class ChannelRepository:
             last_checked_at=(
                 datetime.fromisoformat(row["last_checked_at"])
                 if row["last_checked_at"]
+                else None
+            ),
+            metadata_checked_at=(
+                datetime.fromisoformat(row["metadata_checked_at"])
+                if "metadata_checked_at" in row.keys() and row["metadata_checked_at"]
                 else None
             ),
         )

@@ -18,6 +18,7 @@ class Channel:
     video_count: int | None = None
     view_count: int | None = None
     last_checked_at: datetime | None = None
+    metadata_checked_at: datetime | None = None
 
 
 @dataclass(slots=True)

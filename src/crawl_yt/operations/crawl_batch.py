@@ -7,14 +7,18 @@ from typing import Any
 from ..collectors.channel_collector import ChannelCrawlService
 from ..collectors.ytdlp_channel_video import YtDlpChannelVideoProvider
 from ..collectors.ytdlp_video_metadata import YtDlpVideoMetadataProvider
+from ..collectors.ytdlp_channel_metadata import YtDlpChannelMetadataProvider
 
 
 class CrawlBatchService:
-    def __init__(self, repository, video_provider: Any | None = None, metadata_provider: Any | None = None) -> None:
+    def __init__(self, repository, video_provider: Any | None = None, metadata_provider: Any | None = None, channel_metadata_provider: Any | None = None) -> None:
         self.repository = repository
         self.video_provider = video_provider or YtDlpChannelVideoProvider()
         self.metadata_provider = metadata_provider or (
             YtDlpVideoMetadataProvider() if video_provider is None else None
+        )
+        self.channel_metadata_provider = channel_metadata_provider or (
+            YtDlpChannelMetadataProvider() if video_provider is None else None
         )
 
     def create(self, filters: dict[str, object], sort: str, limit: int):
@@ -30,7 +34,7 @@ class CrawlBatchService:
         items = self.repository.claim_crawl_batch_items(batch_id, chunk_size)
         for item in items:
             try:
-                ChannelCrawlService(self.video_provider, self.repository, cadence_metadata_provider=self.metadata_provider).crawl(
+                ChannelCrawlService(self.video_provider, self.repository, cadence_metadata_provider=self.metadata_provider, channel_metadata_provider=self.channel_metadata_provider).crawl(
                     item.channel_id, full=True
                 )
             except Exception as error:
