@@ -16,6 +16,7 @@ from src.crawl_yt.discovery.channel_discovery import ChannelVerification, Discov
 class DiscoveryNormalizationTests(unittest.TestCase):
     @staticmethod
     def _dated_videos(channel: Channel, count: int = 20) -> list[Video]:
+        count = min(count, 19)
         now = datetime.now(timezone.utc)
         return [Video(f"v{index}", channel.channel_id, f"Video {index}", now, published_at=now - timedelta(days=index % 20)) for index in range(count)]
 

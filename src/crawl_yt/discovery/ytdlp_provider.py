@@ -9,6 +9,7 @@ from yt_dlp import YoutubeDL
 
 from ..database.models import Channel
 from ..collectors.ytdlp_channel_video import normalize_video
+from .cadence import CadenceProbe
 from .channel_discovery import ChannelVerification, DiscoveryBatch
 
 
@@ -99,3 +100,22 @@ class YtDlpDiscoveryProvider:
             [str(entry.get("title") or "") for entry in entries],
             recent_videos,
         )
+
+    def probe_cadence(self, channel: Channel, max_entries: int = 100) -> CadenceProbe:
+        options = {
+            "extract_flat": True,
+            "quiet": True,
+            "no_warnings": False,
+            "skip_download": True,
+            "playlistend": max_entries,
+        }
+        with YoutubeDL(options) as ydl:
+            info = ydl.extract_info(channel_videos_url(channel), download=False)
+        entries = [entry for entry in (info or {}).get("entries", []) if entry]
+        dates = tuple(
+            video.published_at
+            for entry in entries
+            if (video := normalize_video(entry, channel.channel_id)) is not None
+            and video.published_at is not None
+        )
+        return CadenceProbe(dates, exhausted=len(entries) < max_entries)

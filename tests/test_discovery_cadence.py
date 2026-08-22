@@ -8,8 +8,10 @@ from pathlib import Path
 from src.crawl_yt.database.models import Channel, Video
 from src.crawl_yt.database.repository import ChannelRepository
 from src.crawl_yt.discovery.cadence import (
+    CadenceProbe,
     CadenceStatus,
     cadence_band,
+    evidence_from_probe,
     evaluate_cadence,
     rates_from_dates,
 )
@@ -23,6 +25,7 @@ from src.crawl_yt.discovery.channel_discovery import (
 class DiscoveryCadenceTests(unittest.TestCase):
     @staticmethod
     def _qualified_videos(channel: Channel, count: int = 20) -> list[Video]:
+        count = min(count, 19)
         now = datetime.now(timezone.utc)
         return [
             Video(f"v{index}", channel.channel_id, "retirement planning", now, published_at=now - timedelta(days=index % 20))
@@ -37,6 +40,35 @@ class DiscoveryCadenceTests(unittest.TestCase):
 
         self.assertEqual(evaluate_cadence(3.0).status, CadenceStatus.QUALIFIED)
         self.assertEqual(evaluate_cadence(2.99).status, CadenceStatus.BELOW_TARGET)
+
+    def test_probe_prevents_topic_sample_from_capping_high_frequency_channel(self) -> None:
+        now = datetime(2026, 8, 22, tzinfo=timezone.utc)
+        topic_sample = [now - timedelta(days=index) for index in range(20)]
+        probe_dates = [now - timedelta(days=index * 7 / 7) for index in range(30)]
+        result = DiscoveryService._cadence_from_probe(
+            CadenceProbe(tuple(probe_dates), exhausted=False), now
+        )
+        self.assertGreaterEqual(result.videos_per_week or 0, 7.0)
+        self.assertNotAlmostEqual(
+            len(topic_sample) / (30 / 7), result.videos_per_week or 0
+        )
+
+    def test_incomplete_probe_is_insufficient_instead_of_trusted_low_rate(self) -> None:
+        now = datetime(2026, 8, 22, tzinfo=timezone.utc)
+        dates = tuple(now - timedelta(days=index) for index in range(20))
+        result = DiscoveryService._cadence_from_probe(
+            CadenceProbe(dates, exhausted=False), now
+        )
+        self.assertEqual(result.status, CadenceStatus.INSUFFICIENT_DATA)
+
+    def test_probe_classifies_three_five_and_below_three(self) -> None:
+        now = datetime(2026, 8, 22, tzinfo=timezone.utc)
+        cases = ((22, "very good", CadenceStatus.QUALIFIED), (13, "good", CadenceStatus.QUALIFIED), (12, "below target", CadenceStatus.BELOW_TARGET))
+        for count, band, status in cases:
+            dates = tuple(now - timedelta(days=index) for index in range(count))
+            evidence = evidence_from_probe(CadenceProbe(dates, exhausted=True), now)
+            self.assertEqual(evidence.band, band)
+            self.assertEqual(evidence.status, status)
 
     def test_missing_cadence_data_is_not_zero(self) -> None:
         result = evaluate_cadence(None)
@@ -121,6 +153,8 @@ class DiscoveryCadenceTests(unittest.TestCase):
             self.assertEqual(report.final_qualified_count, 0)
             self.assertEqual(report.final_failed_candidates[0].full_crawl_status, "failed")
             self.assertEqual(report.cadence_failed_count, 1)
+            self.assertIsNone(repository.get_channel("UC1"))
+            self.assertEqual(repository.count_discovery_relationships(), 0)
 
     def test_early_stop_counts_final_qualified_not_topic_only(self) -> None:
         class Provider:

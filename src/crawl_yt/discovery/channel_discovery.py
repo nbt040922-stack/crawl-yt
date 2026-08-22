@@ -18,9 +18,11 @@ from ..scoring_lifecycle import ChannelScoringLifecycle
 from .normalization import normalize_discovery_keyword
 from .cadence import (
     MIN_DISCOVERY_VIDEOS_PER_WEEK,
+    CadenceProbe,
     CadenceEvidence,
     CadenceStatus,
     evaluate_cadence,
+    evidence_from_probe,
     rates_from_dates,
 )
 from .relevance import (
@@ -209,6 +211,25 @@ class DiscoveryService:
             videos_per_week_90d=rates.videos_per_week_90d,
         )
 
+    @staticmethod
+    def _cadence_from_probe(probe: CadenceProbe, now=None) -> CadenceEvidence:
+        return evidence_from_probe(probe, now)
+
+    def _cadence_for_candidate(
+        self, channel: Channel, verification: ChannelVerification | None
+    ) -> CadenceEvidence:
+        probe_method = getattr(self.provider, "probe_cadence", None)
+        if callable(probe_method):
+            try:
+                probe = probe_method(channel)
+            except Exception as error:
+                return evaluate_cadence(None, failure=f"cadence_probe_failed: {error}")
+            if isinstance(probe, CadenceProbe):
+                return self._cadence_from_probe(probe)
+        if verification is None or len(verification.recent_videos) >= DISCOVERY_TOPIC_SAMPLE_SIZE:
+            return evaluate_cadence(None)
+        return self._cadence_for(verification)
+
     def discover(
         self,
         keyword: str,
@@ -332,7 +353,7 @@ class DiscoveryService:
                 cadence = (
                     evaluate_cadence(MIN_DISCOVERY_VIDEOS_PER_WEEK)
                     if not self.enforce_topic_gate
-                    else self._cadence_for(verification)
+                    else self._cadence_for_candidate(verified_channel, verification)
                 )
                 candidate.cadence = cadence
                 if cadence.status is CadenceStatus.BELOW_TARGET:
@@ -366,6 +387,7 @@ class DiscoveryService:
                         candidate.full_crawl_status = "succeeded"
                         full_crawled_count += 1
                     except Exception as error:
+                        self.repository.remove_channel_admission(verified_channel.channel_id)
                         candidate.full_crawl_status = "failed"
                         candidate.final_status = "failed"
                         candidate.cadence = evaluate_cadence(

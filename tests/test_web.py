@@ -21,6 +21,7 @@ from src.crawl_yt.web.app import create_app
 
 
 def _dated_videos(channel: Channel, count: int = 20) -> list[Video]:
+    count = min(count, 19)
     now = datetime.now(timezone.utc)
     return [Video(f"{channel.channel_id}-{index}", channel.channel_id, "sample", now, published_at=now - timedelta(days=index)) for index in range(count)]
 

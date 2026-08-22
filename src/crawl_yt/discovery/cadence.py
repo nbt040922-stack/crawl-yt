@@ -34,6 +34,14 @@ class CadenceEvidence:
     videos_per_week_90d: float | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class CadenceProbe:
+    """Bounded date probe; exhausted means the provider returned all entries."""
+
+    published_dates: tuple[datetime, ...]
+    exhausted: bool
+
+
 def cadence_band(videos_per_week: float | None) -> str:
     if videos_per_week is None:
         return "insufficient data"
@@ -84,6 +92,8 @@ def rates_from_dates(
     reference = now or datetime.now(timezone.utc)
     if reference.tzinfo is None:
         reference = reference.replace(tzinfo=timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
     dates = []
     for value in published_dates:
         current = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
@@ -99,4 +109,27 @@ def rates_from_dates(
         recent_30 / (30 / 7),
         recent_90 / (90 / 7),
         span,
+    )
+
+
+def evidence_from_probe(
+    probe: CadenceProbe, now: datetime | None = None
+) -> CadenceEvidence:
+    reference = now or datetime.now(timezone.utc)
+    normalized = [
+        value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        for value in probe.published_dates
+    ]
+    cutoff_30 = reference - timedelta(days=30)
+    recent_30 = sum(value >= cutoff_30 for value in normalized)
+    # A bounded probe is reliable once it reaches the 30-day boundary, is
+    # exhausted, or has at least 30 recent entries (already >= 7/week).
+    covered_window = probe.exhausted or any(value <= cutoff_30 for value in normalized) or recent_30 >= 30
+    if not normalized or not covered_window:
+        return evaluate_cadence(None)
+    rates = rates_from_dates(normalized, reference)
+    return evaluate_cadence(
+        rates.videos_per_week_30d,
+        videos_per_week_30d=rates.videos_per_week_30d,
+        videos_per_week_90d=rates.videos_per_week_90d,
     )

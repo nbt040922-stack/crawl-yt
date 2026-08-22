@@ -473,6 +473,11 @@ class ChannelRepository:
                 )
         return inserted
 
+    def remove_channel_admission(self, channel_id: str) -> None:
+        """Rollback a provisional new-channel admission and cascaded crawl data."""
+        with self._connect() as connection:
+            connection.execute("DELETE FROM channels WHERE channel_id = ?", (channel_id,))
+
     def update_channel_metadata(self, metadata) -> bool:
         """Persist non-empty channel metadata without erasing known values."""
         checked_at = metadata.checked_at or datetime.now(timezone.utc)
