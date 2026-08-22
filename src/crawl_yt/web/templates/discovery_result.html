@@ -19,6 +19,13 @@
   <div class="summary-card"><span>Cross-query duplicates</span><strong>{{ report.cross_query_duplicates }}</strong></div>
   <div class="summary-card"><span>Candidates found</span><strong>{{ report.candidate_count }}</strong></div>
   <div class="summary-card"><span>Accepted</span><strong>{{ report.accepted_count }}</strong></div>
+  <div class="summary-card"><span>Topic accepted</span><strong>{{ report.topic_accepted_count }}</strong></div>
+  <div class="summary-card"><span>Cadence qualified</span><strong>{{ report.cadence_qualified_count }}</strong></div>
+  <div class="summary-card"><span>Below cadence</span><strong>{{ report.cadence_below_target_count }}</strong></div>
+  <div class="summary-card"><span>Cadence insufficient/failed</span><strong>{{ report.cadence_insufficient_count + report.cadence_failed_count }}</strong></div>
+  <div class="summary-card"><span>Full crawled</span><strong>{{ report.full_crawled_count }}</strong></div>
+  <div class="summary-card"><span>Final qualified</span><strong>{{ report.final_qualified_count }}</strong></div>
+  <div class="summary-card"><span>Target qualified</span><strong>{{ report.target_accepted }}</strong></div>
   <div class="summary-card"><span>Rejected</span><strong>{{ report.rejected_count }}</strong></div>
   <div class="summary-card"><span>Search results</span><strong>{{ report.search_results }}</strong></div>
   <div class="summary-card"><span>Unique channels</span><strong>{{ report.unique_channels_in_search }}</strong></div>
@@ -32,8 +39,11 @@
 </section>
 <details><summary>Concepts used for this run</summary><ul>{% for concept in report.effective_concepts %}<li>{{ concept }}</li>{% endfor %}</ul></details>
 <details><summary>Query breakdown</summary>{% if report.query_metrics %}<div class="table-wrap"><table><thead><tr><th>Query</th><th>Raw</th><th>Unique</th><th>New</th><th>Duplicate</th><th>Failure</th></tr></thead><tbody>{% for metric in report.query_metrics %}<tr><td>{{ metric.query }}</td><td>{{ metric.raw_results }}</td><td>{{ metric.unique_candidates }}</td><td>{{ metric.new_candidates }}</td><td>{{ metric.duplicate_candidates }}</td><td>{{ metric.failure or '—' }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<p>No queries were executed.</p>{% endif %}</details>
+{% if report.cadence_rejected_candidates %}<details open><summary>Relevant but below cadence target</summary><ul>{% for candidate in report.cadence_rejected_candidates %}<li>{{ candidate.channel.title }} — {{ '%.2f'|format(candidate.cadence.videos_per_week) }} videos/week ({{ candidate.cadence.band|upper }}): {{ candidate.cadence.reason }}; found by {{ candidate.discovered_by_queries|join('; ') }}</li>{% endfor %}</ul></details>{% endif %}
+{% if report.cadence_insufficient_candidates %}<details open><summary>Relevant channels with insufficient cadence data</summary><ul>{% for candidate in report.cadence_insufficient_candidates %}<li>{{ candidate.channel.title }} — {{ candidate.cadence.reason }}; found by {{ candidate.discovered_by_queries|join('; ') }}</li>{% endfor %}</ul></details>{% endif %}
+{% if report.final_failed_candidates %}<details open><summary>Cadence-qualified channels with failed initial full crawl</summary><div class="table-wrap"><table><thead><tr><th>Channel</th><th>Cadence</th><th>Status</th><th>Reason</th><th>YouTube source</th></tr></thead><tbody>{% for candidate in report.final_failed_candidates %}<tr><td>{{ candidate.channel.title }}<br><code>{{ candidate.channel.channel_id }}</code></td><td>{% if candidate.cadence and candidate.cadence.videos_per_week is not none %}{{ '%.2f'|format(candidate.cadence.videos_per_week) }}/week{% else %}—{% endif %}</td><td>{{ candidate.full_crawl_status|title }}</td><td>{{ candidate.cadence.reason if candidate.cadence else 'Initial Full Crawl failed' }}</td><td><a href="{{ candidate.channel.channel_url or 'https://www.youtube.com/channel/' ~ candidate.channel.channel_id }}" target="_blank" rel="noopener noreferrer">YouTube ↗</a></td></tr>{% endfor %}</tbody></table></div></details>{% endif %}
 {% if not channels %}
-{% if report.rejected_count %}<p class="notice">{{ zero_message }}</p>{% else %}<p class="notice">No channels found for this keyword.</p>{% endif %}
+{% if report.rejected_count or report.topic_accepted_count or report.final_failed_candidates %}<p class="notice">{{ zero_message }}</p>{% else %}<p class="notice">No channels found for this keyword.</p>{% endif %}
 {% else %}
 <h2>Discovered channels</h2>
 <div class="table-wrap"><table>

@@ -51,6 +51,14 @@ def create_app(
     database = repository or TranscriptRepository()
     app = FastAPI(title="crawl-yt dashboard")
     app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
+    initial_crawl_service = None
+    if discovery_provider is None:
+        initial_crawl_service = ChannelCrawlService(
+            video_provider or YtDlpChannelVideoProvider(),
+            database,
+            cadence_metadata_provider=metadata_provider or YtDlpVideoMetadataProvider(),
+            channel_metadata_provider=YtDlpChannelMetadataProvider(),
+        )
 
     @app.exception_handler(HTTPException)
     async def friendly_http_error(request: Request, exc: HTTPException) -> HTMLResponse:
@@ -116,7 +124,9 @@ def create_app(
         except ValueError as error:
             raise HTTPException(400, "Topic profile is invalid") from error
         try:
-            report = DiscoveryService(provider, database).discover(
+            report = DiscoveryService(
+                provider, database, initial_crawl_service=initial_crawl_service
+            ).discover(
                 keyword.strip(), limit, dry_run=dry_run, mode=mode,
                 related_terms=related_terms, topic_profile_id=selected_profile_id,
                 extra_concepts=extra_concepts,
@@ -125,11 +135,18 @@ def create_app(
             raise HTTPException(400, str(error)) from error
         rejection_summary = report.rejection_summary()
         if report.accepted_count == 0:
-            unusable = rejection_summary["no_usable_sample"] + rejection_summary["verification_failed"]
-            if report.rejected_count and unusable * 2 >= report.rejected_count:
-                zero_message = "Channel topic verification could not obtain enough recent video titles."
+            if report.final_failed_candidates:
+                zero_message = "Cadence-qualified candidates could not complete the initial full crawl."
+            elif report.topic_accepted_count and report.cadence_below_target_count:
+                zero_message = "Candidates matched the topic but most publish below 3 videos/week."
+            elif report.topic_accepted_count and report.cadence_insufficient_count:
+                zero_message = "Relevant candidates did not provide enough publication timestamps for cadence qualification."
             else:
-                zero_message = "Candidates were mostly off-topic. Consider adding extra concepts or using Broad."
+                unusable = rejection_summary["no_usable_sample"] + rejection_summary["verification_failed"]
+                if report.rejected_count and unusable * 2 >= report.rejected_count:
+                    zero_message = "Channel topic verification could not obtain enough recent video titles."
+                else:
+                    zero_message = "Candidates were mostly off-topic. Consider adding extra concepts or using Broad."
         else:
             zero_message = None
         return render(

@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.crawl_yt.database.models import Channel
+from src.crawl_yt.database.models import Channel, Video
 from src.crawl_yt.database.repository import ChannelRepository
 from src.crawl_yt.discovery.channel_discovery import ChannelVerification, DiscoveryBatch, DiscoveryService
+
+
+def _dated_videos(channel: Channel, count: int = 20) -> list[Video]:
+    now = datetime.now(timezone.utc)
+    return [Video(f"{channel.channel_id}-{index}", channel.channel_id, "sample", now, published_at=now - timedelta(days=index)) for index in range(count)]
 
 
 class TopicProfileRepositoryTests(unittest.TestCase):
@@ -70,7 +76,7 @@ class TopicProfileRepositoryTests(unittest.TestCase):
                 return DiscoveryBatch(1, [Channel("UC1", "Senior Solo")], "fake")
 
             def verify(self, channel, sample_size=20):
-                return ChannelVerification(channel, ["Why I enjoy living alone"] * sample_size)
+                return ChannelVerification(channel, ["Why I enjoy living alone"] * sample_size, _dated_videos(channel, sample_size))
 
         profile = self.repository.create_topic_profile("Solo Aging", "", ["living alone"])
         report = DiscoveryService(Provider(), self.repository).discover(
@@ -102,7 +108,7 @@ class TopicProfileRepositoryTests(unittest.TestCase):
 
             def verify(inner_self, channel, sample_size=20):
                 self.assertTrue(self.repository.delete_topic_profile(profile.id))
-                return ChannelVerification(channel, ["Why I enjoy living alone"] * sample_size)
+                return ChannelVerification(channel, ["Why I enjoy living alone"] * sample_size, _dated_videos(channel, sample_size))
 
         report = DiscoveryService(Provider(), self.repository).discover(
             "solo aging", 1, topic_profile_id=profile.id
@@ -125,7 +131,7 @@ class TopicProfileRepositoryTests(unittest.TestCase):
             def verify(self, channel, sample_size=20):
                 self.verify_calls.append((channel.channel_id, sample_size))
                 titles = ["Living alone after 65"] * 7 + ["Independent aging at home"] * 6 + ["Garden tour"] * 7
-                return ChannelVerification(channel, titles)
+                return ChannelVerification(channel, titles, _dated_videos(channel, sample_size))
 
         profile = self.repository.create_topic_profile("Solo Aging", "", ["living alone"])
         without_provider = Provider()
@@ -147,7 +153,7 @@ class TopicProfileRepositoryTests(unittest.TestCase):
                 return DiscoveryBatch(1, [Channel("UC3", "Candidate")], "fake")
 
             def verify(self, channel, sample_size=20):
-                return ChannelVerification(channel, ["Retirement planning"] * sample_size)
+                return ChannelVerification(channel, ["Retirement planning"] * sample_size, _dated_videos(channel, sample_size))
 
         DiscoveryService(Provider(), self.repository).discover("retirement", 1, dry_run=True)
         with self.repository._connect() as connection:

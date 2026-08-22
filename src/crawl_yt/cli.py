@@ -137,13 +137,20 @@ def doctor(
 def discover(
     args: argparse.Namespace,
     provider: ChannelDiscoveryProvider | None = None,
-    _: ChannelVideoProvider | None = None,
-    __: VideoMetadataProvider | None = None,
+    video_provider: ChannelVideoProvider | None = None,
+    metadata_provider: VideoMetadataProvider | None = None,
     ___: TranscriptProvider | None = None,
     repository: ChannelRepository | None = None,
 ) -> int:
+    repository = repository or _repository()
     service = DiscoveryService(
-        provider or YtDlpDiscoveryProvider(), repository or _repository()
+        provider or YtDlpDiscoveryProvider(),
+        repository,
+        initial_crawl_service=ChannelCrawlService(
+            video_provider or YtDlpChannelVideoProvider(),
+            repository,
+            cadence_metadata_provider=metadata_provider or YtDlpVideoMetadataProvider(),
+        ),
     )
     try:
         report = service.discover(args.keyword, args.limit, args.dry_run)

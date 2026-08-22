@@ -12,9 +12,17 @@ from ..config import (
     DISCOVERY_PER_QUERY_BATCH_SIZE,
 )
 from ..database.models import Channel
+from ..database.models import Video
 from ..database.repository import ChannelRepository
 from ..scoring_lifecycle import ChannelScoringLifecycle
 from .normalization import normalize_discovery_keyword
+from .cadence import (
+    MIN_DISCOVERY_VIDEOS_PER_WEEK,
+    CadenceEvidence,
+    CadenceStatus,
+    evaluate_cadence,
+    rates_from_dates,
+)
 from .relevance import (
     DISCOVERY_TOPIC_SAMPLE_SIZE,
     TopicEvidence,
@@ -62,12 +70,17 @@ class DiscoveryBatch:
 class ChannelVerification:
     channel: Channel
     recent_video_titles: list[str]
+    recent_videos: list[Video] = field(default_factory=list)
 
 
 class ChannelDiscoveryProvider(Protocol):
     def search(self, keyword: str, limit: int) -> DiscoveryBatch: ...
 
     def verify(self, channel: Channel, sample_size: int = DISCOVERY_TOPIC_SAMPLE_SIZE) -> ChannelVerification: ...
+
+
+class InitialCrawlService(Protocol):
+    def crawl(self, channel_id: str, *, full: bool = False): ...
 
 
 @dataclass(slots=True)
@@ -85,6 +98,9 @@ class DiscoveryCandidate:
     channel: Channel
     evidence: TopicEvidence
     discovered_by_queries: list[str] = field(default_factory=list)
+    cadence: CadenceEvidence | None = None
+    full_crawl_status: str = "not_run"
+    final_status: str = "topic_rejected"
 
 
 @dataclass(slots=True)
@@ -120,6 +136,17 @@ class DiscoveryReport:
     executed_queries: list[str] = field(default_factory=list)
     query_metrics: list[DiscoveryQueryMetric] = field(default_factory=list)
     cross_query_duplicates: int = 0
+    topic_accepted_count: int = 0
+    cadence_qualified_count: int = 0
+    cadence_below_target_count: int = 0
+    cadence_insufficient_count: int = 0
+    cadence_failed_count: int = 0
+    full_crawled_count: int = 0
+    final_qualified_count: int = 0
+    topic_accepted_candidates: list[DiscoveryCandidate] = field(default_factory=list)
+    cadence_rejected_candidates: list[DiscoveryCandidate] = field(default_factory=list)
+    cadence_insufficient_candidates: list[DiscoveryCandidate] = field(default_factory=list)
+    final_failed_candidates: list[DiscoveryCandidate] = field(default_factory=list)
 
     def rejection_summary(self) -> dict[str, int]:
         summary = {
@@ -156,11 +183,31 @@ class DiscoveryService:
         self, provider: ChannelDiscoveryProvider, repository: ChannelRepository,
         scoring_lifecycle: ChannelScoringLifecycle | None = None,
         enforce_topic_gate: bool = True,
+        initial_crawl_service: InitialCrawlService | None = None,
     ) -> None:
         self.provider = provider
         self.repository = repository
         self.scoring_lifecycle = scoring_lifecycle or ChannelScoringLifecycle(repository)
         self.enforce_topic_gate = enforce_topic_gate
+        self.initial_crawl_service = initial_crawl_service
+
+    @staticmethod
+    def _cadence_for(verification: ChannelVerification | None) -> CadenceEvidence:
+        if verification is None:
+            return evaluate_cadence(None)
+        dates = [
+            video.published_at
+            for video in verification.recent_videos
+            if video.published_at is not None
+        ]
+        if not dates:
+            return evaluate_cadence(None)
+        rates = rates_from_dates(dates)
+        return evaluate_cadence(
+            rates.videos_per_week_30d,
+            videos_per_week_30d=rates.videos_per_week_30d,
+            videos_per_week_90d=rates.videos_per_week_90d,
+        )
 
     def discover(
         self,
@@ -207,8 +254,13 @@ class DiscoveryService:
         new_relationships = existing_relationships = 0
         accepted: list[DiscoveryCandidate] = []
         rejected: list[DiscoveryCandidate] = []
+        topic_accepted_candidates: list[DiscoveryCandidate] = []
+        cadence_rejected_candidates: list[DiscoveryCandidate] = []
+        cadence_insufficient_candidates: list[DiscoveryCandidate] = []
+        final_failed_candidates: list[DiscoveryCandidate] = []
         processed_channels: list[Channel] = []
         score_candidates: set[str] = set()
+        full_crawled_count = 0
         inspected = 0
         unique: dict[str, Channel] = {}
         candidates_by_id: dict[str, DiscoveryCandidate] = {}
@@ -254,6 +306,7 @@ class DiscoveryService:
                 unique[channel_id] = channel
                 metric.new_candidates += 1
                 inspected += 1
+                verification = None
                 if not self.enforce_topic_gate:
                     verified_channel = channel
                     evidence = TopicEvidence(0, 0, 0.0, "none", "legacy", True, "legacy discovery")
@@ -271,22 +324,70 @@ class DiscoveryService:
                 candidate = DiscoveryCandidate(verified_channel, evidence, [query])
                 candidates_by_id[channel_id] = candidate
                 if not evidence.accepted:
+                    candidate.final_status = "topic_rejected"
                     rejected.append(candidate)
                     continue
-                accepted.append(candidate)
+                topic_accepted_candidates.append(candidate)
+                candidate.final_status = "cadence_pending"
+                cadence = (
+                    evaluate_cadence(MIN_DISCOVERY_VIDEOS_PER_WEEK)
+                    if not self.enforce_topic_gate
+                    else self._cadence_for(verification)
+                )
+                candidate.cadence = cadence
+                if cadence.status is CadenceStatus.BELOW_TARGET:
+                    candidate.final_status = "cadence_rejected"
+                    cadence_rejected_candidates.append(candidate)
+                    continue
+                if cadence.status is CadenceStatus.INSUFFICIENT_DATA:
+                    candidate.final_status = "cadence_insufficient"
+                    cadence_insufficient_candidates.append(candidate)
+                    continue
+                if cadence.status is CadenceStatus.FAILED:
+                    candidate.final_status = "cadence_failed"
+                    final_failed_candidates.append(candidate)
+                    continue
+                candidate.final_status = "cadence_qualified"
                 known = self.repository.get_channel(verified_channel.channel_id) is not None
                 if max_new_channels is not None and not known and new_channels >= max_new_channels:
                     continue
                 if dry_run:
-                    is_new_channel = not known
-                    is_new_relationship = not self.repository.discovery_exists(
-                        verified_channel.channel_id, provenance_keyword, batch.source
-                    )
+                    candidate.full_crawl_status = "dry_run"
+                    candidate.final_status = "qualified"
+                    accepted.append(candidate)
+                    processed_channels.append(verified_channel)
+                    continue
+                if not known and self.initial_crawl_service is not None:
+                    self.repository.upsert_channel(verified_channel)
+                    try:
+                        self.initial_crawl_service.crawl(
+                            verified_channel.channel_id, full=True
+                        )
+                        candidate.full_crawl_status = "succeeded"
+                        full_crawled_count += 1
+                    except Exception as error:
+                        candidate.full_crawl_status = "failed"
+                        candidate.final_status = "failed"
+                        candidate.cadence = evaluate_cadence(
+                            cadence.videos_per_week,
+                            videos_per_week_30d=cadence.videos_per_week_30d,
+                            videos_per_week_90d=cadence.videos_per_week_90d,
+                            failure=f"Initial Full Crawl failed: {error}",
+                        )
+                        final_failed_candidates.append(candidate)
+                        continue
+                elif not known:
+                    candidate.full_crawl_status = "not_configured"
                 else:
-                    is_new_channel = self.repository.upsert_channel(verified_channel)
-                    is_new_relationship = self.repository.record_discovery(
-                        verified_channel.channel_id, provenance_keyword, batch.source
-                    )
+                    candidate.full_crawl_status = "not_required"
+                candidate.final_status = "qualified"
+                accepted.append(candidate)
+                is_new_channel = not known
+                if is_new_channel:
+                    self.repository.upsert_channel(verified_channel)
+                is_new_relationship = self.repository.record_discovery(
+                    verified_channel.channel_id, provenance_keyword, batch.source
+                )
                 processed_channels.append(verified_channel)
                 score_repository = getattr(self.scoring_lifecycle, "repository", self.repository)
                 current_score = score_repository.get_channel_score(verified_channel.channel_id) if hasattr(score_repository, "get_channel_score") else None
@@ -328,6 +429,23 @@ class DiscoveryService:
             executed_queries=executed_queries,
             query_metrics=query_metrics,
             cross_query_duplicates=cross_query_duplicates,
+            topic_accepted_count=len(topic_accepted_candidates),
+            cadence_qualified_count=sum(
+                1 for item in topic_accepted_candidates
+                if item.cadence is not None and item.cadence.status is CadenceStatus.QUALIFIED
+            ),
+            cadence_below_target_count=len(cadence_rejected_candidates),
+            cadence_insufficient_count=len(cadence_insufficient_candidates),
+            cadence_failed_count=sum(
+                1 for item in final_failed_candidates
+                if item.cadence is not None and item.cadence.status is CadenceStatus.FAILED
+            ),
+            full_crawled_count=full_crawled_count,
+            final_qualified_count=len(accepted),
+            topic_accepted_candidates=topic_accepted_candidates,
+            cadence_rejected_candidates=cadence_rejected_candidates,
+            cadence_insufficient_candidates=cadence_insufficient_candidates,
+            final_failed_candidates=final_failed_candidates,
         )
         if not dry_run:
             scoring = self.scoring_lifecycle.score_channels(score_candidates)
@@ -350,6 +468,13 @@ class DiscoveryService:
                     "unique_channels": report.unique_channels_in_search,
                     "accepted": report.accepted_count,
                     "rejected": report.rejected_count,
+                    "topic_accepted": report.topic_accepted_count,
+                    "cadence_qualified": report.cadence_qualified_count,
+                    "cadence_below_target": report.cadence_below_target_count,
+                    "cadence_insufficient": report.cadence_insufficient_count,
+                    "cadence_failed": report.cadence_failed_count,
+                    "full_crawled": report.full_crawled_count,
+                    "final_qualified": report.final_qualified_count,
                     "coverage_threshold": report.coverage_threshold,
                     "minimum_distinct_concepts": report.minimum_distinct_concepts,
                     "identity_floor": report.identity_floor,
@@ -357,6 +482,9 @@ class DiscoveryService:
                 candidate_evidence=(
                     [_candidate_payload(item, True) for item in accepted]
                     + [_candidate_payload(item, False) for item in rejected]
+                    + [_candidate_payload(item, False) for item in cadence_rejected_candidates]
+                    + [_candidate_payload(item, False) for item in cadence_insufficient_candidates]
+                    + [_candidate_payload(item, False) for item in final_failed_candidates]
                 ),
             )
         return report
@@ -384,6 +512,20 @@ def _candidate_payload(candidate: DiscoveryCandidate, accepted: bool) -> dict[st
         "identity": evidence.identity,
         "reason": evidence.reason,
         "verification_status": "failed" if evidence.reason.startswith("verification_failed:") else "completed",
+        "discovered_by_queries": list(candidate.discovered_by_queries),
+        "cadence": (
+            {
+                "status": candidate.cadence.status.value,
+                "videos_per_week": candidate.cadence.videos_per_week,
+                "band": candidate.cadence.band,
+                "reason": candidate.cadence.reason,
+                "videos_per_week_30d": candidate.cadence.videos_per_week_30d,
+                "videos_per_week_90d": candidate.cadence.videos_per_week_90d,
+            }
+            if candidate.cadence is not None else None
+        ),
+        "full_crawl_status": candidate.full_crawl_status,
+        "final_status": candidate.final_status,
         "matched_concepts": evidence.matched_concepts,
         "title_evidence": [
             {"title": item.title, "matched_concepts": item.matched_concepts}

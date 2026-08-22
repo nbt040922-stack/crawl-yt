@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.crawl_yt.database.models import Channel
+from src.crawl_yt.database.models import Channel, Video
 from src.crawl_yt.database.repository import ChannelRepository, VideoRepository
 from src.crawl_yt.discovery.channel_discovery import (
     ChannelVerification,
@@ -22,6 +23,11 @@ from src.crawl_yt.discovery.channel_scoring import ChannelScoringService
 from src.crawl_yt.discovery.ytdlp_provider import channel_videos_url, normalize_channel
 
 
+def _dated_videos(channel: Channel, count: int = 20) -> list[Video]:
+    now = datetime.now(timezone.utc)
+    return [Video(f"{channel.channel_id}-{index}", channel.channel_id, "sample", now, published_at=now - timedelta(days=index)) for index in range(count)]
+
+
 class FakeProvider:
     def search(self, keyword: str, limit: int) -> DiscoveryBatch:
         self.keyword = keyword
@@ -32,7 +38,7 @@ class FakeProvider:
         )
 
     def verify(self, channel, sample_size=20):
-        return ChannelVerification(channel, [f"{self.keyword} planning"] * sample_size)
+        return ChannelVerification(channel, [f"{self.keyword} planning"] * sample_size, _dated_videos(channel, sample_size))
 
 
 class DiscoveryTests(unittest.TestCase):
@@ -51,7 +57,7 @@ class DiscoveryTests(unittest.TestCase):
                     raise RuntimeError("verification unavailable")
                 count = matches[channel.channel_id] if isinstance(matches, dict) else matches
                 titles = [f"{self.keyword} planning"] * count + ["Unrelated gardening"] * (sample_size - count)
-                return ChannelVerification(channel, titles)
+                return ChannelVerification(channel, titles, _dated_videos(channel, sample_size))
 
         return Provider()
 
@@ -71,7 +77,7 @@ class DiscoveryTests(unittest.TestCase):
                 count = matches[channel.channel_id] if isinstance(matches, dict) else matches
                 titles = ["Retirement planning advice"] * count
                 titles += ["Unrelated gardening"] * (sample_size - count)
-                return ChannelVerification(channel, titles)
+                return ChannelVerification(channel, titles, _dated_videos(channel, sample_size))
 
         return Provider()
 
@@ -265,7 +271,7 @@ class DiscoveryTests(unittest.TestCase):
                 return DiscoveryBatch(len(channels), channels, "fake")
 
             def verify(self, channel, sample_size=20):
-                return ChannelVerification(channel, ["Retirement planning advice"] * sample_size)
+                return ChannelVerification(channel, ["Retirement planning advice"] * sample_size, _dated_videos(channel, sample_size))
 
         with tempfile.TemporaryDirectory() as directory:
             repository = ChannelRepository(Path(directory) / "test.db")
@@ -321,7 +327,7 @@ class DiscoveryTests(unittest.TestCase):
                 return DiscoveryBatch(1, [Channel("UC1", "Living Alone")], "fake")
 
             def verify(self, channel, sample_size=20):
-                return ChannelVerification(channel, ["Why I enjoy living alone"] * sample_size)
+                return ChannelVerification(channel, ["Why I enjoy living alone"] * sample_size, _dated_videos(channel, sample_size))
 
         with tempfile.TemporaryDirectory() as directory:
             repository = ChannelRepository(Path(directory) / "test.db")

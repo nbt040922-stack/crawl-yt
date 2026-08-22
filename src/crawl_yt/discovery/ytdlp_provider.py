@@ -8,6 +8,7 @@ from typing import Any
 from yt_dlp import YoutubeDL
 
 from ..database.models import Channel
+from ..collectors.ytdlp_channel_video import normalize_video
 from .channel_discovery import ChannelVerification, DiscoveryBatch
 
 
@@ -88,4 +89,13 @@ class YtDlpDiscoveryProvider:
             view_count=channel.view_count,
             last_checked_at=channel.last_checked_at,
         )
-        return ChannelVerification(verified, [str(entry.get("title") or "") for entry in entries])
+        recent_videos = [
+            video
+            for entry in entries
+            if (video := normalize_video(entry, channel.channel_id)) is not None
+        ]
+        return ChannelVerification(
+            verified,
+            [str(entry.get("title") or "") for entry in entries],
+            recent_videos,
+        )

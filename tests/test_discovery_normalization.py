@@ -4,16 +4,21 @@ import inspect
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.crawl_yt.database.models import Channel
+from src.crawl_yt.database.models import Channel, Video
 from src.crawl_yt.database.repository import ChannelRepository
 from src.crawl_yt.discovery.normalization import normalize_discovery_keyword
 from src.crawl_yt.discovery.channel_discovery import ChannelVerification, DiscoveryBatch, DiscoveryService
 
 
 class DiscoveryNormalizationTests(unittest.TestCase):
+    @staticmethod
+    def _dated_videos(channel: Channel, count: int = 20) -> list[Video]:
+        now = datetime.now(timezone.utc)
+        return [Video(f"v{index}", channel.channel_id, f"Video {index}", now, published_at=now - timedelta(days=index % 20)) for index in range(count)]
+
     def test_canonical_normalization_preserves_unicode_and_punctuation(self) -> None:
         self.assertEqual(normalize_discovery_keyword(" Retirement "), "retirement")
         self.assertEqual(normalize_discovery_keyword("social   security"), "social security")
@@ -65,14 +70,14 @@ class DiscoveryNormalizationTests(unittest.TestCase):
 
             def search(self, keyword, limit):
                 self.query = keyword
-                return DiscoveryBatch(1, [Channel("UC1", "One")], "search")
+                return DiscoveryBatch(1, [Channel("UC1", "Retirement Planning One")], "search")
 
             def verify(self, channel, sample_size=20):
                 titles = [
                     "retirement planning" if index % 2 == 0 else "planning for living alone"
                     for index in range(sample_size)
                 ]
-                return ChannelVerification(channel, titles)
+                return ChannelVerification(channel, titles, DiscoveryNormalizationTests._dated_videos(channel, sample_size))
 
         with tempfile.TemporaryDirectory() as directory:
             repository = ChannelRepository(Path(directory) / "db.sqlite")

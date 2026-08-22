@@ -5,7 +5,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from io import BytesIO
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -20,6 +20,11 @@ from src.crawl_yt.transcripts.provider import TranscriptData
 from src.crawl_yt.web.app import create_app
 
 
+def _dated_videos(channel: Channel, count: int = 20) -> list[Video]:
+    now = datetime.now(timezone.utc)
+    return [Video(f"{channel.channel_id}-{index}", channel.channel_id, "sample", now, published_at=now - timedelta(days=index)) for index in range(count)]
+
+
 class DiscoveryFake:
     def __init__(self):
         self.calls = []
@@ -30,7 +35,7 @@ class DiscoveryFake:
         return DiscoveryBatch(2, [Channel("UC1", "One", channel_url="https://youtube.com/channel/UC1"), Channel("UC3", "Two", channel_url="https://youtube.com/channel/UC3")], "fake")
 
     def verify(self, channel, sample_size=20):
-        return ChannelVerification(channel, [f"{self.keyword} planning"] * sample_size)
+        return ChannelVerification(channel, [f"{self.keyword} planning"] * sample_size, _dated_videos(channel, sample_size))
 
 
 class EmptyDiscoveryFake:
@@ -45,7 +50,7 @@ class RelevanceDiscoveryFake:
 
     def verify(self, channel, sample_size=20):
         count = 20 if channel.channel_id == "UCA" else 1
-        return ChannelVerification(channel, [f"{self.keyword} planning"] * count + ["Unrelated topic"] * (sample_size - count))
+        return ChannelVerification(channel, [f"{self.keyword} planning"] * count + ["Unrelated topic"] * (sample_size - count), _dated_videos(channel, sample_size))
 
 
 class ModeDiscoveryFake:
@@ -60,7 +65,7 @@ class ModeDiscoveryFake:
 
     def verify(self, channel, sample_size=20):
         titles = [f"{self.keyword} planning" if index % 2 == 0 else "Living alone tips" for index in range(self.matches)]
-        return ChannelVerification(channel, titles + ["Unrelated topic"] * (sample_size - self.matches))
+        return ChannelVerification(channel, titles + ["Unrelated topic"] * (sample_size - self.matches), _dated_videos(channel, sample_size))
 
 
 class EmptySampleDiscoveryFake:
@@ -83,7 +88,7 @@ class ProfileDiscoveryFake:
     def verify(self, channel, sample_size=20):
         self.verify_calls.append((channel.channel_id, sample_size))
         titles = ["Why I enjoy living alone after 65"] * 13 + ["Kitchen tools"] * 7
-        return ChannelVerification(channel, titles)
+        return ChannelVerification(channel, titles, _dated_videos(channel, sample_size))
 
 
 class MultiQueryDiscoveryFake:
@@ -109,7 +114,7 @@ class MultiQueryDiscoveryFake:
             if channel.channel_id == "UC-REJECT"
             else ["Retirement planning advice"] * sample_size
         )
-        return ChannelVerification(channel, titles)
+        return ChannelVerification(channel, titles, _dated_videos(channel, sample_size))
 
 
 class VideoFake:
