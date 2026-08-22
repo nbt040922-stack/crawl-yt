@@ -21,12 +21,14 @@ from .models import (
     OperationalBudget,
     Transcript,
     TranscriptAttempt,
+    TopicProfile,
     Video,
     VideoScore,
     WorkItem,
     WorkPlan,
 )
 from ..discovery.normalization import normalize_discovery_keyword
+from ..discovery.relevance import is_meaningful_topic_concept, normalize_topic_terms
 from ..crawl_policy import failure_retry_interval
 
 MAX_CHANNEL_EXPORT_ROWS = 50_000
@@ -236,6 +238,35 @@ class ChannelRepository:
                     ON discovery_queries(depth);
                 CREATE INDEX IF NOT EXISTS idx_discovery_queries_status
                     ON discovery_queries(status);
+                CREATE TABLE IF NOT EXISTS topic_profiles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                    description TEXT NOT NULL DEFAULT '',
+                    concept_phrases_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_topic_profiles_name
+                    ON topic_profiles(name);
+                CREATE TABLE IF NOT EXISTS discovery_relevance_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    keyword TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    target_accepted INTEGER NOT NULL,
+                    maximum_candidates INTEGER NOT NULL,
+                    profile_id INTEGER,
+                    profile_name TEXT,
+                    effective_concepts_json TEXT NOT NULL,
+                    summary_json TEXT NOT NULL,
+                    candidate_evidence_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (profile_id) REFERENCES topic_profiles(id)
+                        ON DELETE RESTRICT
+                );
+                CREATE INDEX IF NOT EXISTS idx_discovery_relevance_runs_created_at
+                    ON discovery_relevance_runs(created_at);
+                CREATE INDEX IF NOT EXISTS idx_discovery_relevance_runs_profile_id
+                    ON discovery_relevance_runs(profile_id);
                 CREATE TABLE IF NOT EXISTS work_plans (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     created_at TEXT NOT NULL,
@@ -434,6 +465,124 @@ class ChannelRepository:
                  self._timestamp(checked_at), metadata.channel_id),
             )
         return cursor.rowcount == 1
+
+    def create_topic_profile(
+        self, name: str, description: str, concept_phrases: list[str]
+    ) -> TopicProfile:
+        normalized_name = " ".join(name.split())
+        concepts = [
+            item for item in normalize_topic_terms(concept_phrases)
+            if is_meaningful_topic_concept(item)
+        ]
+        if not normalized_name:
+            raise ValueError("topic profile name is required")
+        if not concepts:
+            raise ValueError("at least one meaningful concept is required")
+        now = datetime.now(timezone.utc)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """INSERT INTO topic_profiles
+                   (name, description, concept_phrases_json, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (normalized_name, description.strip(), json.dumps(concepts),
+                 self._timestamp(now), self._timestamp(now)),
+            )
+        return self.get_topic_profile(int(cursor.lastrowid))
+
+    def get_topic_profile(self, profile_id: int) -> TopicProfile | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM topic_profiles WHERE id = ?", (profile_id,)
+            ).fetchone()
+        return self._topic_profile(row) if row else None
+
+    def list_topic_profiles(self) -> list[TopicProfile]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM topic_profiles ORDER BY name COLLATE NOCASE, id"
+            ).fetchall()
+        return [self._topic_profile(row) for row in rows]
+
+    def update_topic_profile(
+        self, profile_id: int, name: str, description: str,
+        concept_phrases: list[str],
+    ) -> TopicProfile:
+        normalized_name = " ".join(name.split())
+        concepts = [
+            item for item in normalize_topic_terms(concept_phrases)
+            if is_meaningful_topic_concept(item)
+        ]
+        if not normalized_name:
+            raise ValueError("topic profile name is required")
+        if not concepts:
+            raise ValueError("at least one meaningful concept is required")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """UPDATE topic_profiles SET name = ?, description = ?,
+                   concept_phrases_json = ?, updated_at = ? WHERE id = ?""",
+                (normalized_name, description.strip(), json.dumps(concepts),
+                 self._timestamp(datetime.now(timezone.utc)), profile_id),
+            )
+        if cursor.rowcount != 1:
+            raise ValueError("topic profile not found")
+        return self.get_topic_profile(profile_id)
+
+    def delete_topic_profile(self, profile_id: int) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """DELETE FROM topic_profiles WHERE id = ? AND NOT EXISTS (
+                   SELECT 1 FROM discovery_relevance_runs WHERE profile_id = ?
+                   )""",
+                (profile_id, profile_id),
+            )
+        return cursor.rowcount == 1
+
+    def create_discovery_relevance_run(
+        self, *, keyword: str, mode: str, target_accepted: int,
+        maximum_candidates: int, profile_id: int | None,
+        profile_name: str | None, effective_concepts: list[str],
+        summary: dict[str, object], candidate_evidence: list[dict[str, object]],
+    ) -> int:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """INSERT INTO discovery_relevance_runs
+                   (keyword, mode, target_accepted, maximum_candidates,
+                    profile_id, profile_name, effective_concepts_json,
+                    summary_json, candidate_evidence_json, created_at)
+                   VALUES (?, ?, ?, ?,
+                           (SELECT id FROM topic_profiles WHERE id = ?),
+                           ?, ?, ?, ?, ?)""",
+                (
+                    normalize_discovery_keyword(keyword), mode, target_accepted,
+                    maximum_candidates, profile_id, profile_name,
+                    json.dumps(effective_concepts, ensure_ascii=False),
+                    json.dumps(summary, ensure_ascii=False),
+                    json.dumps(candidate_evidence, ensure_ascii=False),
+                    self._timestamp(datetime.now(timezone.utc)),
+                ),
+            )
+        return int(cursor.lastrowid)
+
+    def get_discovery_relevance_run(self, run_id: int) -> dict[str, object] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM discovery_relevance_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": int(row["id"]),
+            "keyword": row["keyword"],
+            "mode": row["mode"],
+            "target_accepted": int(row["target_accepted"]),
+            "maximum_candidates": int(row["maximum_candidates"]),
+            "profile_id": row["profile_id"],
+            "profile_name": row["profile_name"],
+            "effective_concepts": list(json.loads(row["effective_concepts_json"])),
+            "summary": dict(json.loads(row["summary_json"])),
+            "candidate_evidence": list(json.loads(row["candidate_evidence_json"])),
+            "created_at": datetime.fromisoformat(row["created_at"]),
+        }
 
     def record_discovery(
         self,
@@ -946,6 +1095,17 @@ class ChannelRepository:
             keyword=row["keyword"],
             source=row["source"],
             discovered_at=datetime.fromisoformat(row["discovered_at"]),
+        )
+
+    @staticmethod
+    def _topic_profile(row: sqlite3.Row) -> TopicProfile:
+        return TopicProfile(
+            id=int(row["id"]),
+            name=row["name"],
+            description=row["description"],
+            concept_phrases=list(json.loads(row["concept_phrases_json"])),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
         )
 
 

@@ -9,7 +9,14 @@ from ..database.models import Channel
 from ..database.repository import ChannelRepository
 from ..scoring_lifecycle import ChannelScoringLifecycle
 from .normalization import normalize_discovery_keyword
-from .relevance import DISCOVERY_TOPIC_SAMPLE_SIZE, TopicEvidence, evaluate_channel_topic, normalize_topic_terms
+from .relevance import (
+    DISCOVERY_TOPIC_SAMPLE_SIZE,
+    TopicEvidence,
+    build_effective_concepts,
+    evaluate_channel_topic,
+    get_topic_policy,
+    normalize_topic_terms,
+)
 
 
 @dataclass(slots=True)
@@ -59,6 +66,10 @@ class DiscoveryReport:
     rejected_candidates: list[DiscoveryCandidate] = field(default_factory=list)
     target_accepted: int = 0
     maximum_candidates: int = 0
+    topic_profile_id: int | None = None
+    topic_profile_name: str | None = None
+    effective_concepts: list[str] = field(default_factory=list)
+    audit_run_id: int | None = None
 
     def rejection_summary(self) -> dict[str, int]:
         summary = {
@@ -109,6 +120,8 @@ class DiscoveryService:
         max_new_channels: int | None = None,
         mode: str = "balanced",
         related_terms: Iterable[str] | str | None = None,
+        topic_profile_id: int | None = None,
+        extra_concepts: Iterable[str] | str | None = None,
     ) -> DiscoveryReport:
         search_query = " ".join(keyword.split())
         provenance_keyword = normalize_discovery_keyword(search_query)
@@ -116,8 +129,17 @@ class DiscoveryService:
             raise ValueError("discovery keyword must not be empty")
         if limit < 1:
             raise ValueError("discovery limit must be positive")
-        normalized_related = normalize_topic_terms(
-            related_terms.split(",") if isinstance(related_terms, str) else (related_terms or [])
+        policy = get_topic_policy(mode)
+        profile = self.repository.get_topic_profile(topic_profile_id) if topic_profile_id is not None else None
+        if topic_profile_id is not None and profile is None:
+            raise ValueError("topic profile not found")
+        normalized_related = normalize_topic_terms([
+            *_topic_values(related_terms), *_topic_values(extra_concepts),
+        ])
+        effective_concepts = build_effective_concepts(
+            search_query,
+            profile.concept_phrases if profile else (),
+            normalized_related,
         )
         # Search beyond the requested accepted count, but keep the provider bounded.
         candidate_cap = min(1000, max(limit, limit * 5))
@@ -144,8 +166,8 @@ class DiscoveryService:
                     verification = self.provider.verify(channel, DISCOVERY_TOPIC_SAMPLE_SIZE)
                     verified_channel = verification.channel
                     evidence = evaluate_channel_topic(
-                        verified_channel, search_query, normalized_related,
-                        verification.recent_video_titles, mode,
+                        verified_channel, search_query, effective_concepts,
+                        verification.recent_video_titles, policy.mode,
                     )
                 except Exception as error:
                     evidence = TopicEvidence(0, 0, 0.0, "none", "none", False, f"verification_failed: {error}")
@@ -189,7 +211,7 @@ class DiscoveryService:
             existing_discovery_relationships=existing_relationships,
             channels=processed_channels,
             new_channel_ids=new_channel_ids,
-            mode=mode.casefold(),
+            mode=policy.mode,
             related_terms=normalized_related,
             candidate_count=inspected,
             accepted_count=len(accepted),
@@ -198,9 +220,61 @@ class DiscoveryService:
             rejected_candidates=rejected,
             target_accepted=limit,
             maximum_candidates=candidate_cap,
+            topic_profile_id=profile.id if profile else None,
+            topic_profile_name=profile.name if profile else None,
+            effective_concepts=effective_concepts,
         )
         if not dry_run:
             scoring = self.scoring_lifecycle.score_channels(score_candidates)
             report.channels_scored = scoring.channels_scored
             report.scoring_failures = scoring.scoring_failures
+        if not dry_run and self.enforce_topic_gate:
+            report.audit_run_id = self.repository.create_discovery_relevance_run(
+                keyword=provenance_keyword,
+                mode=report.mode,
+                target_accepted=limit,
+                maximum_candidates=candidate_cap,
+                profile_id=report.topic_profile_id,
+                profile_name=report.topic_profile_name,
+                effective_concepts=report.effective_concepts,
+                summary={
+                    "search_results": report.search_results,
+                    "unique_channels": report.unique_channels_in_search,
+                    "accepted": report.accepted_count,
+                    "rejected": report.rejected_count,
+                },
+                candidate_evidence=(
+                    [_candidate_payload(item, True) for item in accepted]
+                    + [_candidate_payload(item, False) for item in rejected]
+                ),
+            )
         return report
+
+
+def _topic_values(values: Iterable[str] | str | None) -> list[str]:
+    if values is None:
+        return []
+    if isinstance(values, str):
+        return [item for line in values.splitlines() for item in line.split(",")]
+    return list(values)
+
+
+def _candidate_payload(candidate: DiscoveryCandidate, accepted: bool) -> dict[str, object]:
+    evidence = candidate.evidence
+    return {
+        "channel_id": candidate.channel.channel_id,
+        "channel_title": candidate.channel.title,
+        "channel_url": candidate.channel.channel_url,
+        "accepted": accepted,
+        "sample_size": evidence.sample_size,
+        "topic_matches": evidence.topic_matches,
+        "topic_coverage": evidence.topic_coverage,
+        "identity": evidence.identity,
+        "reason": evidence.reason,
+        "verification_status": "failed" if evidence.reason.startswith("verification_failed:") else "completed",
+        "matched_concepts": evidence.matched_concepts,
+        "title_evidence": [
+            {"title": item.title, "matched_concepts": item.matched_concepts}
+            for item in evidence.title_evidence
+        ],
+    }

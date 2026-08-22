@@ -5,7 +5,9 @@ import unittest
 from src.crawl_yt.database.models import Channel
 from src.crawl_yt.discovery.relevance import (
     DISCOVERY_TOPIC_SAMPLE_SIZE,
+    build_effective_concepts,
     evaluate_channel_topic,
+    match_topic_concepts,
 )
 
 
@@ -63,6 +65,87 @@ class DiscoveryRelevanceTests(unittest.TestCase):
         )
         self.assertNotEqual(result.identity, "strong")
         self.assertFalse(result.accepted)
+
+    def test_effective_concepts_normalize_deduplicate_and_match_with_evidence(self) -> None:
+        concepts = build_effective_concepts(
+            "Solo Aging", [" Living Alone ", "living   alone", "Senior Life"], ["AGING ALONE"]
+        )
+        self.assertEqual(concepts, ["solo aging", "living alone", "senior life", "aging alone"])
+        self.assertEqual(
+            build_effective_concepts("aging", ["living alone"], ["health", "."]),
+            ["living alone"],
+        )
+        self.assertEqual(match_topic_concepts("Why I Chose Living Alone After 65", concepts), ["living alone"])
+        self.assertEqual(match_topic_concepts("Why I Live Alone at 67", ["living alone"]), ["living alone"])
+        self.assertEqual(
+            match_topic_concepts("Living alone as an older adult", ["older adult living alone"]),
+            ["older adult living alone"],
+        )
+
+    def test_non_word_concepts_and_news_plural_do_not_match(self) -> None:
+        self.assertEqual(match_topic_concepts("Update. More later.", ["."]), [])
+        self.assertEqual(match_topic_concepts("Life News Today", ["new life"]), [])
+        self.assertEqual(match_topic_concepts("A party for everyone", ["art"]), [])
+        self.assertEqual(match_topic_concepts("Senior lifestyle ideas", ["senior life"]), [])
+
+    def test_reordered_matching_requires_local_phrase_structure(self) -> None:
+        concepts = ["living alone", "life after 60"]
+        self.assertEqual(
+            match_topic_concepts("Stop living with fear when you are not alone", concepts),
+            [],
+        )
+        self.assertEqual(
+            match_topic_concepts("60 recipes after a life change", concepts),
+            [],
+        )
+        self.assertEqual(
+            match_topic_concepts(
+                "Living alone as an older adult", ["older adult living alone"]
+            ),
+            ["older adult living alone"],
+        )
+
+    def test_top_matched_concepts_are_ranked_by_title_frequency(self) -> None:
+        result = evaluate_channel_topic(
+            Channel("UC1", "Unrelated"),
+            "solo aging",
+            ["living alone", "aging alone"],
+            ["Living alone today", "Aging alone safely", "Aging alone well", "Aging alone at home"],
+            "broad",
+        )
+        self.assertEqual(result.matched_concepts[:2], ["aging alone", "living alone"])
+
+    def test_profile_concepts_raise_realistic_channel_coverage_with_title_evidence(self) -> None:
+        concepts = ["living alone", "aging alone", "life after 60", "life over 60", "senior life", "solo retirement", "independent aging"]
+        matching = [
+            "Why I Chose Living Alone After 65", "Aging Alone Without Fear", "My Life After 60",
+            "How Life Over 60 Really Feels", "Senior Life on My Own", "Planning a Solo Retirement",
+            "Independent Aging at Home", "Living Alone and Loving It", "Aging Alone With Confidence",
+            "Life After 60: A New Chapter", "Senior Life Daily Routine", "Solo Retirement Budget",
+            "Independent Aging Decisions",
+        ]
+        sample = matching + ["Kitchen tools", "Garden tour", "Favorite books", "Travel vlog", "Family recipe", "Morning walk", "Phone review"]
+        with_profile = evaluate_channel_topic(Channel("UC1", "Senior Life Solo Path"), "solo aging", concepts, sample, "balanced")
+        without_profile = evaluate_channel_topic(Channel("UC1", "Senior Life Solo Path"), "solo aging", [], sample, "balanced")
+        self.assertEqual(with_profile.topic_matches, 13)
+        self.assertTrue(with_profile.accepted)
+        self.assertLess(without_profile.topic_coverage, with_profile.topic_coverage)
+        self.assertIn("living alone", with_profile.matched_concepts)
+        self.assertEqual(with_profile.title_evidence[0].matched_concepts, ["living alone"])
+
+    def test_matching_identity_phrase_does_not_rescue_unrelated_music_channel(self) -> None:
+        sample = ["Classic songs", "Live performance", "Album review", "Guitar lesson", "Concert footage"] * 4
+        result = evaluate_channel_topic(Channel("UCM", "Golden Years Music"), "solo aging", ["golden years"], sample, "balanced")
+        self.assertEqual(result.identity, "strong")
+        self.assertEqual(result.topic_coverage, 0)
+        self.assertFalse(result.accepted)
+
+    def test_profile_concepts_do_not_change_mode_thresholds(self) -> None:
+        channel = Channel("UC1", "Unrelated")
+        sample = lambda count: ["Living alone after 65"] * count + ["Garden tour"] * (20 - count)
+        self.assertFalse(evaluate_channel_topic(channel, "solo aging", ["living alone"], sample(7), "balanced").accepted)
+        self.assertTrue(evaluate_channel_topic(channel, "solo aging", ["living alone"], sample(9), "balanced").accepted)
+        self.assertTrue(evaluate_channel_topic(channel, "solo aging", ["living alone"], sample(13), "strict").accepted)
 
 
 if __name__ == "__main__":

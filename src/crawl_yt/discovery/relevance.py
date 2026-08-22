@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from typing import Iterable
 
 from ..database.models import Channel
@@ -35,6 +36,14 @@ class TopicEvidence:
     identity_evidence: str
     accepted: bool
     reason: str
+    matched_concepts: list[str] = field(default_factory=list)
+    title_evidence: list["TitleTopicEvidence"] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class TitleTopicEvidence:
+    title: str
+    matched_concepts: list[str]
 
 
 def normalize_topic_terms(values: Iterable[str]) -> list[str]:
@@ -46,6 +55,23 @@ def normalize_topic_terms(values: Iterable[str]) -> list[str]:
             seen.add(normalized)
             result.append(normalized)
     return result
+
+
+def build_effective_concepts(
+    keyword: str,
+    profile_concepts: Iterable[str] = (),
+    extra_concepts: Iterable[str] = (),
+) -> list[str]:
+    return [
+        concept
+        for concept in normalize_topic_terms([keyword, *profile_concepts, *extra_concepts])
+        if is_meaningful_topic_concept(concept)
+    ]
+
+
+def is_meaningful_topic_concept(value: str) -> bool:
+    tokens = _tokens(value)
+    return len(tokens) >= 2 or (len(tokens) == 1 and tokens[0] not in _GENERIC_TOKENS)
 
 
 def get_topic_policy(mode: str) -> TopicPolicy:
@@ -60,24 +86,71 @@ def _tokens(text: str) -> list[str]:
     return re.findall(r"[\w]+", " ".join(text.split()).casefold(), flags=re.UNICODE)
 
 
-def _matches(text: str, phrases: list[str], query_tokens: list[str]) -> bool:
-    normalized = " ".join(text.split()).casefold()
-    if any(phrase in normalized for phrase in phrases):
-        return True
-    meaningful = [token for token in query_tokens if token not in _GENERIC_TOKENS]
-    if len(meaningful) >= 2 and all(token in _tokens(normalized) for token in meaningful):
-        return True
-    if len(meaningful) == 1 and len(query_tokens) == 1:
-        return meaningful[0] in _tokens(normalized)
+def _token_forms(token: str) -> set[str]:
+    forms = {token}
+    if len(token) > 5 and token.endswith("ing"):
+        base = token[:-3]
+        forms.update((base, base + "e"))
+    return forms
+
+
+def _ordered_phrase_match(text_tokens: list[str], concept_tokens: list[str]) -> bool:
+    width = len(concept_tokens)
+    return any(
+        all(
+            _token_forms(concept) & _token_forms(token)
+            for concept, token in zip(concept_tokens, text_tokens[start:start + width])
+        )
+        for start in range(len(text_tokens) - width + 1)
+    )
+
+
+def _conservative_reordered_match(
+    text_tokens: list[str], concept_tokens: list[str]
+) -> bool:
+    if len(concept_tokens) < 3:
+        return False
+    width = len(concept_tokens) + 2
+    for start in range(max(1, len(text_tokens) - width + 1)):
+        window = text_tokens[start:start + width]
+        remaining = list(window)
+        for concept in concept_tokens:
+            match = next((i for i, token in enumerate(remaining)
+                          if _token_forms(concept) & _token_forms(token)), None)
+            if match is None:
+                break
+            remaining.pop(match)
+        else:
+            if any(
+                _ordered_phrase_match(window, concept_tokens[index:index + 2])
+                for index in range(len(concept_tokens) - 1)
+            ):
+                return True
     return False
+
+
+def match_topic_concepts(text: str, concepts: Iterable[str]) -> list[str]:
+    text_tokens = _tokens(text)
+    matched: list[str] = []
+    for concept in normalize_topic_terms(concepts):
+        concept_tokens = _tokens(concept)
+        if not concept_tokens or (
+            len(concept_tokens) == 1 and concept_tokens[0] in _GENERIC_TOKENS
+        ):
+            continue
+        if _ordered_phrase_match(text_tokens, concept_tokens) or (
+            _conservative_reordered_match(text_tokens, concept_tokens)
+        ):
+            matched.append(concept)
+    return matched
 
 
 def _identity(channel: Channel, phrases: list[str], query_tokens: list[str]) -> tuple[str, str]:
     text = " ".join(filter(None, [channel.title, channel.description])).strip()
     if not text:
         return "none", "none"
-    if any(phrase in " ".join(text.split()).casefold() for phrase in phrases):
-        return "strong", "title/description phrase"
+    if matched := match_topic_concepts(text, phrases):
+        return "strong", "title/description: " + "; ".join(matched[:3])
     meaningful = [token for token in query_tokens if token not in _GENERIC_TOKENS]
     hits = sum(token in _tokens(text) for token in meaningful)
     if len(meaningful) >= 2 and hits == len(meaningful):
@@ -103,7 +176,8 @@ def evaluate_channel_topic(
     primary_phrase = [] if generic_single_primary else [query]
     phrases = normalize_topic_terms([*primary_phrase, *related])
     titles = list(recent_video_titles)[:DISCOVERY_TOPIC_SAMPLE_SIZE]
-    matches = sum(_matches(title, phrases, query_tokens) for title in titles)
+    title_evidence = [TitleTopicEvidence(title, match_topic_concepts(title, phrases)) for title in titles]
+    matches = sum(bool(item.matched_concepts) for item in title_evidence)
     sample_size = len(titles)
     coverage = matches / sample_size if sample_size else 0.0
     identity, identity_evidence = _identity(channel, phrases, query_tokens)
@@ -118,4 +192,11 @@ def evaluate_channel_topic(
         reason = "channel identity matched but recent video coverage is too low"
     else:
         reason = "topic appears only in isolated or insufficient recent videos"
-    return TopicEvidence(sample_size, matches, coverage, identity, identity_evidence, accepted, reason)
+    concept_counts = Counter(
+        concept for item in title_evidence for concept in item.matched_concepts
+    )
+    matched_concepts = [concept for concept, _ in concept_counts.most_common()]
+    return TopicEvidence(
+        sample_size, matches, coverage, identity, identity_evidence, accepted,
+        reason, matched_concepts, title_evidence,
+    )

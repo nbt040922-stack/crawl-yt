@@ -70,6 +70,21 @@ class EmptySampleDiscoveryFake:
         return ChannelVerification(channel, [])
 
 
+class ProfileDiscoveryFake:
+    def __init__(self):
+        self.search_calls = []
+        self.verify_calls = []
+
+    def search(self, keyword, limit):
+        self.search_calls.append((keyword, limit))
+        return DiscoveryBatch(1, [Channel("UCPROFILE", "Senior Life Solo Path")], "fake")
+
+    def verify(self, channel, sample_size=20):
+        self.verify_calls.append((channel.channel_id, sample_size))
+        titles = ["Why I enjoy living alone after 65"] * 13 + ["Kitchen tools"] * 7
+        return ChannelVerification(channel, titles)
+
+
 class VideoFake:
     def __init__(self, video=None):
         self.calls = []
@@ -356,7 +371,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         for label in ("Candidates found", "Accepted", "Rejected", "Mode", "Minimum coverage", "Accepted", "Rejected candidates", "Topic coverage", "Matched sample", "Identity", "Evidence"):
             self.assertIn(label, response.text)
-        self.assertIn("Related terms: planning", response.text)
+        self.assertIn("Extra concepts: planning", response.text)
         self.assertIn("Accepted", response.text)
         self.assertIn("1 / 20", response.text)
         self.assertIn("Rejected<br>", response.text)
@@ -384,7 +399,7 @@ class WebTests(unittest.TestCase):
         )
         for label in ("Target accepted", "Maximum candidates", "Search results inspected", "Unique channels inspected", "No usable video sample", "0–15% coverage", "Verification failed"):
             self.assertIn(label, response.text)
-        self.assertIn("Candidates were mostly off-topic. Consider adding related terms or using Broad.", response.text)
+        self.assertIn("Candidates were mostly off-topic. Consider adding extra concepts or using Broad.", response.text)
 
     def test_discovery_empty_sample_diagnostic_message(self) -> None:
         response = TestClient(create_app(repository=self.repository, discovery_provider=EmptySampleDiscoveryFake())).post(
@@ -392,6 +407,55 @@ class WebTests(unittest.TestCase):
         )
         self.assertIn("No usable video sample: 1", response.text)
         self.assertIn("Channel topic verification could not obtain enough recent video titles.", response.text)
+
+    def test_topic_profile_crud_ui_and_discovery_selector(self) -> None:
+        created = self.client.post(
+            "/topic-profiles",
+            data={"name": "Solo Aging", "description": "Independent later life", "concept_phrases": "Living Alone\nliving   alone\nSenior Life"},
+            follow_redirects=False,
+        )
+        self.assertEqual(created.status_code, 303)
+        detail_url = created.headers["location"]
+        detail = self.client.get(detail_url)
+        self.assertIn("Solo Aging", detail.text)
+        self.assertIn("living alone", detail.text)
+        self.assertIn("senior life", detail.text)
+        self.assertIn("Solo Aging", self.client.get("/topic-profiles").text)
+        discovery = self.client.get("/discovery")
+        self.assertIn("Topic profile", discovery.text)
+        self.assertIn("Extra concepts", discovery.text)
+        self.assertIn('class="target-field"', discovery.text)
+
+        profile_id = int(detail_url.rsplit("/", 1)[-1])
+        updated = self.client.post(
+            f"/topic-profiles/{profile_id}",
+            data={"name": "Solo Aging Updated", "description": "", "concept_phrases": "independent aging"},
+            follow_redirects=False,
+        )
+        self.assertEqual(updated.status_code, 303)
+        self.assertIn("Solo Aging Updated", self.client.get(detail_url).text)
+        deleted = self.client.post(f"/topic-profiles/{profile_id}/delete", follow_redirects=False)
+        self.assertEqual(deleted.status_code, 303)
+        self.assertNotIn("Solo Aging Updated", self.client.get("/topic-profiles").text)
+
+    def test_discovery_profile_renders_snapshot_top_concepts_and_title_evidence(self) -> None:
+        profile = self.repository.create_topic_profile("Solo Aging", "", ["living alone", "senior life"])
+        provider = ProfileDiscoveryFake()
+        response = TestClient(create_app(repository=self.repository, discovery_provider=provider)).post(
+            "/discovery",
+            data={"keyword": "solo aging", "limit": "1", "mode": "balanced", "topic_profile_id": str(profile.id), "extra_concepts": "independent aging"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Topic profile", response.text)
+        self.assertIn("Solo Aging", response.text)
+        self.assertIn("Concepts used", response.text)
+        self.assertIn("Top matched concepts", response.text)
+        self.assertIn("living alone", response.text)
+        self.assertIn("Why I enjoy living alone after 65", response.text)
+        self.assertIn("matched: living alone", response.text)
+        self.assertIn("Kitchen tools", response.text)
+        self.assertEqual(provider.search_calls, [("solo aging", 5)])
+        self.assertEqual(provider.verify_calls, [("UCPROFILE", 20)])
 
     def test_discovery_history_shows_keyword_counts_and_links(self) -> None:
         response = self.client.get("/discovery")

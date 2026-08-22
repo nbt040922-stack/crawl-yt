@@ -1,0 +1,4 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ title }}</h1><form class="profile-form" method="post" action="{{ '/topic-profiles/' ~ profile.id if profile else '/topic-profiles' }}"><label>Name <input name="name" value="{{ profile.name if profile else '' }}" required></label><label>Description <textarea name="description" rows="4">{{ profile.description if profile else '' }}</textarea></label><label>Concept phrases <textarea name="concept_phrases" rows="14" required>{{ profile.concept_phrases|join('\n') if profile else '' }}</textarea><small>One phrase per line.</small></label><button>{{ 'Save changes' if profile else 'Create profile' }}</button></form>
+{% endblock %}

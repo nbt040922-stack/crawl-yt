@@ -7,6 +7,7 @@ from typing import Any
 from urllib.parse import quote, urlencode
 import json
 import re
+import sqlite3
 from io import BytesIO
 from datetime import datetime, timezone
 
@@ -94,7 +95,7 @@ def create_app(
 
     @app.get("/discovery", response_class=HTMLResponse)
     def discovery_page(request: Request) -> HTMLResponse:
-        return render(request, "form.html", title="Discovery", form="discovery", history=database.list_discovery_keyword_summaries())
+        return render(request, "form.html", title="Discovery", form="discovery", history=database.list_discovery_keyword_summaries(), profiles=database.list_topic_profiles())
 
     @app.post("/discovery", response_class=HTMLResponse)
     def discovery_action(
@@ -103,19 +104,32 @@ def create_app(
         limit: int = Form(...),
         mode: str = Form("balanced"),
         related_terms: str = Form(""),
+        topic_profile_id: str = Form(""),
+        extra_concepts: str = Form(""),
         dry_run: bool = Form(False),
     ) -> HTMLResponse:
         if not keyword.strip() or not 1 <= limit <= 1000:
             raise HTTPException(400, "Keyword and limit 1-1000 are required")
         provider = discovery_provider or YtDlpDiscoveryProvider()
-        report = DiscoveryService(provider, database).discover(keyword.strip(), limit, dry_run=dry_run, mode=mode, related_terms=related_terms)
+        try:
+            selected_profile_id = int(topic_profile_id) if topic_profile_id.strip() else None
+        except ValueError as error:
+            raise HTTPException(400, "Topic profile is invalid") from error
+        try:
+            report = DiscoveryService(provider, database).discover(
+                keyword.strip(), limit, dry_run=dry_run, mode=mode,
+                related_terms=related_terms, topic_profile_id=selected_profile_id,
+                extra_concepts=extra_concepts,
+            )
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
         rejection_summary = report.rejection_summary()
         if report.accepted_count == 0:
             unusable = rejection_summary["no_usable_sample"] + rejection_summary["verification_failed"]
             if report.rejected_count and unusable * 2 >= report.rejected_count:
                 zero_message = "Channel topic verification could not obtain enough recent video titles."
             else:
-                zero_message = "Candidates were mostly off-topic. Consider adding related terms or using Broad."
+                zero_message = "Candidates were mostly off-topic. Consider adding extra concepts or using Broad."
         else:
             zero_message = None
         return render(
@@ -132,6 +146,61 @@ def create_app(
             rejection_summary=rejection_summary,
             zero_message=zero_message,
         )
+
+    @app.get("/topic-profiles", response_class=HTMLResponse)
+    def topic_profiles(request: Request) -> HTMLResponse:
+        return render(request, "topic_profiles.html", title="Topic Profiles", profiles=database.list_topic_profiles())
+
+    @app.get("/topic-profiles/new", response_class=HTMLResponse)
+    def topic_profile_new(request: Request) -> HTMLResponse:
+        return render(request, "topic_profile_form.html", title="New Topic Profile", profile=None)
+
+    @app.post("/topic-profiles")
+    def topic_profile_create(
+        name: str = Form(...), description: str = Form(""),
+        concept_phrases: str = Form(...),
+    ) -> RedirectResponse:
+        try:
+            profile = database.create_topic_profile(name, description, concept_phrases.splitlines())
+        except (ValueError, sqlite3.IntegrityError) as error:
+            raise HTTPException(400, str(error)) from error
+        return RedirectResponse(f"/topic-profiles/{profile.id}", status_code=303)
+
+    @app.get("/topic-profiles/{profile_id}", response_class=HTMLResponse)
+    def topic_profile_detail(request: Request, profile_id: int) -> HTMLResponse:
+        profile = database.get_topic_profile(profile_id)
+        if profile is None:
+            raise HTTPException(404, "Topic profile not found")
+        return render(request, "topic_profile_detail.html", title=profile.name, profile=profile)
+
+    @app.get("/topic-profiles/{profile_id}/edit", response_class=HTMLResponse)
+    def topic_profile_edit(request: Request, profile_id: int) -> HTMLResponse:
+        profile = database.get_topic_profile(profile_id)
+        if profile is None:
+            raise HTTPException(404, "Topic profile not found")
+        return render(request, "topic_profile_form.html", title=f"Edit {profile.name}", profile=profile)
+
+    @app.post("/topic-profiles/{profile_id}")
+    def topic_profile_update(
+        profile_id: int, name: str = Form(...), description: str = Form(""),
+        concept_phrases: str = Form(...),
+    ) -> RedirectResponse:
+        try:
+            database.update_topic_profile(profile_id, name, description, concept_phrases.splitlines())
+        except sqlite3.IntegrityError as error:
+            raise HTTPException(400, str(error)) from error
+        except ValueError as error:
+            status = 404 if "not found" in str(error) else 400
+            raise HTTPException(status, str(error)) from error
+        return RedirectResponse(f"/topic-profiles/{profile_id}", status_code=303)
+
+    @app.post("/topic-profiles/{profile_id}/delete")
+    def topic_profile_delete(profile_id: int) -> RedirectResponse:
+        if database.get_topic_profile(profile_id) is None:
+            raise HTTPException(404, "Topic profile not found")
+        if not database.delete_topic_profile(profile_id):
+            raise HTTPException(409, "Topic profile is used by Discovery history and cannot be deleted")
+        return RedirectResponse("/topic-profiles", status_code=303)
 
     @app.get("/discovery/keywords/{keyword}", response_class=HTMLResponse)
     def discovery_keyword_detail(request: Request, keyword: str, page: int = 1, per_page: int = 50) -> HTMLResponse:

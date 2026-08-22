@@ -1,0 +1,5 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Topic Profiles</h1><p><a class="button" href="/topic-profiles/new">Create profile</a></p>
+{% if profiles %}<div class="grid">{% for profile in profiles %}<article><h2><a href="/topic-profiles/{{ profile.id }}">{{ profile.name }}</a></h2><p>{{ profile.description or '—' }}</p><p>{{ profile.concept_phrases|length }} concepts</p><p><a href="/topic-profiles/{{ profile.id }}/edit">Edit</a></p></article>{% endfor %}</div>{% else %}<p class="notice">No topic profiles yet.</p>{% endif %}
+{% endblock %}

@@ -30,6 +30,16 @@ class ChannelDiscovery:
 
 
 @dataclass(slots=True)
+class TopicProfile:
+    id: int | None
+    name: str
+    description: str
+    concept_phrases: list[str]
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(slots=True)
 class ChannelCrawlState:
     channel_id: str
     last_crawl_started_at: datetime | None = None
