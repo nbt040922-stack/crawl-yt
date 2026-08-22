@@ -38,6 +38,32 @@ class DiscoveryRelevanceTests(unittest.TestCase):
         generic = evaluate_channel_topic(Channel("UC2", "Life"), "solo aging", [], ["Aging population statistics"] * 20, "balanced")
         self.assertFalse(generic.accepted)
 
+    def test_generic_single_word_queries_do_not_match_by_themselves(self) -> None:
+        for query in ("aging", "life", "health", "money", "reality", "living"):
+            result = evaluate_channel_topic(
+                Channel("UC1", "Unrelated Channel"), query, [], [f"{query.title()} news today"] * 20, "balanced"
+            )
+            self.assertEqual(result.topic_matches, 0, query)
+            self.assertFalse(result.accepted, query)
+
+    def test_explicit_related_phrase_and_multiword_query_still_match(self) -> None:
+        primary = evaluate_channel_topic(
+            Channel("UC1", "Unrelated"), "solo aging", [], ["The Reality of Solo Aging"] * 20, "balanced"
+        )
+        related = evaluate_channel_topic(
+            Channel("UC2", "Unrelated"), "aging", ["aging alone"], ["The Reality of Aging Alone"] * 20, "balanced"
+        )
+        self.assertTrue(primary.accepted)
+        self.assertTrue(related.accepted)
+
+    def test_generic_single_word_identity_does_not_become_strong(self) -> None:
+        result = evaluate_channel_topic(
+            Channel("UC1", "Health News", description="Health news and updates"),
+            "health", [], ["Unrelated gardening"] * 20, "balanced"
+        )
+        self.assertNotEqual(result.identity, "strong")
+        self.assertFalse(result.accepted)
+
 
 if __name__ == "__main__":
     unittest.main()

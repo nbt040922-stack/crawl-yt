@@ -98,7 +98,10 @@ def evaluate_channel_topic(
     query = " ".join(str(keyword).split()).casefold()
     query_tokens = _tokens(query)
     related = normalize_topic_terms(related_terms)
-    phrases = normalize_topic_terms([query, *related])
+    primary_tokens = _tokens(query)
+    generic_single_primary = len(primary_tokens) == 1 and primary_tokens[0] in _GENERIC_TOKENS
+    primary_phrase = [] if generic_single_primary else [query]
+    phrases = normalize_topic_terms([*primary_phrase, *related])
     titles = list(recent_video_titles)[:DISCOVERY_TOPIC_SAMPLE_SIZE]
     matches = sum(_matches(title, phrases, query_tokens) for title in titles)
     sample_size = len(titles)
